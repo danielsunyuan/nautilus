@@ -24,6 +24,7 @@ logs/
 *.key
 *.key_secret
 *.env
+.env.*
 
 # Compressed files
 *.tar.gz*
@@ -78,6 +79,8 @@ env/
 *.sh
 !scripts/ci/install-cargo-nextest.sh
 !scripts/ci/verify-ci-inputs.sh
+!.docker/nordvpn_entrypoint.sh
+!.docker/nordvpn_healthcheck.sh
 *tmp/
 *temp/
 
@@ -99,7 +102,6 @@ claude.config.json
 .aider*
 .continue/
 
-AGENTS.md
 CLAUDE.md
 CODEX.md
 GEMINI.md

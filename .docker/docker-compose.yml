@@ -1,4 +1,83 @@
 services:
+  workspace:
+    container_name: nautilus-workspace
+    build:
+      context: ..
+      dockerfile: .docker/DockerfileUbuntu
+    working_dir: /workspace
+    command: ["sleep", "infinity"]
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+      - ../.env.polymarket
+      - ../.env.nordvpn
+    volumes:
+      - ..:/workspace
+    networks:
+      - nautilus-network
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  nordvpn:
+    container_name: nautilus-nordvpn
+    build:
+      context: ..
+      dockerfile: .docker/nordvpn.dockerfile
+    env_file:
+      - ../.env.nordvpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["/usr/local/bin/nordvpn-entrypoint"]
+    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD-SHELL", "/usr/local/bin/nordvpn-healthcheck"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 20s
+    restart: unless-stopped
+
+  papertrade:
+    container_name: nautilus-papertrade
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/polymarket/polymarket_paper_tester.py
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+      - ../.env.polymarket
+    volumes:
+      - ..:/workspace:ro
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
   postgres:
     container_name: nautilus-database
     image: postgres
