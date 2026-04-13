@@ -54,7 +54,7 @@ PY
 
 - Description: Port the first-wave `quant` strategy preset semantics into a Nautilus strategy library for BTC-first paper execution.
 - Agent Type: Strategy
-- Status: Pending
+- Status: Completed
 - Dependencies: TASK-003, TASK-004
 - Output: Strategy preset/config modules covering grid, quant filters, spread switch handling, flow and momentum gates, and library-backed stop variants, with `spread_regime` documented as a parity-gap mode instead of a daemon default.
 - Validation:
