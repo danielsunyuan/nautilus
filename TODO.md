@@ -74,7 +74,7 @@ PY
 
 - Description: Generate Nautilus-native run reports equivalent to the current `RESULTS.md` leaderboard and aggregate performance summaries.
 - Agent Type: Analytics / reporting
-- Status: Pending
+- Status: Completed
 - Dependencies: TASK-004, TASK-005, TASK-006
 - Output: Reporting module and tests for leaderboard parity fields, stop/settlement accounting, and per-strategy aggregation.
 - Validation:
