@@ -6,7 +6,9 @@ from datetime import datetime
 from datetime import timedelta
 from math import ceil
 from typing import Any
+from urllib.parse import urlparse
 
+import ipaddress
 import msgspec
 
 from nautilus_trader.adapters.polymarket.common.symbol import get_polymarket_instrument_id
@@ -45,7 +47,40 @@ def normalize_crypto_asset(asset: str) -> str:
 
 
 def _normalize_base_url(base_url: str | None) -> str:
-    return (base_url or DEFAULT_GAMMA_BASE_URL).rstrip("/")
+    return validate_http_base_url(base_url or DEFAULT_GAMMA_BASE_URL, name="gamma_base_url")
+
+
+def _validate_hostname(hostname: str | None, *, name: str) -> str:
+    if not hostname:
+        raise ValueError(f"{name} must include a hostname")
+    lowered = hostname.strip().lower()
+    if lowered == "localhost":
+        raise ValueError(f"{name} must not target localhost")
+    try:
+        ip = ipaddress.ip_address(lowered)
+    except ValueError:
+        return lowered
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+        raise ValueError(f"{name} must not target a private or local address")
+    return lowered
+
+
+def _validate_url(url: str, *, schemes: tuple[str, ...], name: str) -> str:
+    parsed = urlparse(str(url).strip())
+    if parsed.scheme not in schemes:
+        raise ValueError(f"{name} must use one of {schemes}")
+    if not parsed.netloc:
+        raise ValueError(f"{name} must include a network location")
+    _validate_hostname(parsed.hostname, name=name)
+    return parsed.geturl().rstrip("/")
+
+
+def validate_http_base_url(base_url: str, *, name: str = "base_url") -> str:
+    return _validate_url(base_url, schemes=("http", "https"), name=name)
+
+
+def validate_ws_url(url: str, *, name: str = "wss_url") -> str:
+    return _validate_url(url, schemes=("ws", "wss"), name=name)
 
 
 def _round_start_epoch(now: datetime) -> int:

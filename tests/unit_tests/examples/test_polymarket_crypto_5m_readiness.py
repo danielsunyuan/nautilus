@@ -157,3 +157,48 @@ def test_render_readiness_markdown_includes_blockers() -> None:
     assert "## Blocking Checks" in markdown
     assert "signal_latency" in markdown
     assert "kill_switch" in markdown
+
+
+def test_write_readiness_outputs_persists_timestamped_json_and_markdown(tmp_path: Path) -> None:
+    report = readiness.assess_live_readiness(
+        generated_at=datetime(2026, 4, 14, 14, 0, tzinfo=UTC),
+        latency_summary={
+            "samples": 3,
+            "signal_to_order_p50_ms": 220.0,
+            "signal_to_order_p95_ms": 260.0,
+            "min_boundary_headroom_ms": 1600.0,
+        },
+        disconnect_summary={
+            "events": 2,
+            "recoveries": 2,
+            "max_recovery_seconds": 4.0,
+        },
+        cancel_replace_supported=True,
+        kill_switch_configured=True,
+        routing_assumption="Sandbox execution only; live routing unresolved and intentionally gated.",
+        parity_passed=True,
+    )
+
+    paths = readiness.write_readiness_outputs(report_root=tmp_path, report=report)
+
+    assert paths["readiness_latest"].exists()
+    assert paths["readiness_timestamped"].name.startswith("readiness_")
+    assert paths["readiness_markdown"].read_text(encoding="utf-8").startswith("# Polymarket 5m Live Readiness Gate")
+
+
+def test_main_rejects_malformed_evidence_payload(monkeypatch, tmp_path: Path) -> None:
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text("{\"latency_summary\": {}}", encoding="utf-8")
+
+    class _Parser:
+        def parse_args(self):
+            return type("Args", (), {"input_json": str(evidence_path), "report_root": str(tmp_path)})()
+
+    monkeypatch.setattr(readiness, "_build_parser", lambda: _Parser())
+
+    try:
+        readiness.main()
+    except ValueError as exc:
+        assert "disconnect_summary" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected malformed readiness payload to fail")

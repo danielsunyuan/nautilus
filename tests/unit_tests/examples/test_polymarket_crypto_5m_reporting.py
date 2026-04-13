@@ -305,7 +305,49 @@ def test_write_report_outputs_persists_json_and_markdown() -> None:
 
         latest = root / "polymarket" / "reports" / "summary_latest.json"
         assert paths["summary_latest"] == latest
+        assert paths["summary_timestamped"].name.startswith("summary_")
         assert json.loads(latest.read_text(encoding="utf-8"))["schema_version"] == "1"
+        assert json.loads(paths["summary_timestamped"].read_text(encoding="utf-8"))["generated_at"] == "2026-04-14T13:00:00Z"
         assert paths["results_markdown"].read_text(encoding="utf-8").startswith(
             "# Polymarket 5m Crypto Paper Trading — Nautilus Results"
         )
+
+
+def test_write_report_outputs_rejects_parent_relative_root() -> None:
+    with TemporaryDirectory() as tmp:
+        summary = {
+            "schema_version": "1",
+            "generated_at": "2026-04-14T13:00:00Z",
+            "sessions": [],
+            "leaderboard": [],
+            "totals": {
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "no_trade": 0,
+                "target_exits": 0,
+                "stop_losses": 0,
+                "settled_wins": 0,
+                "settled_losses": 0,
+                "win_rate": 0.0,
+                "net_pnl": 0.0,
+                "roi": 0.0,
+                "rounds": 0,
+            },
+            "notes": [],
+            "data_quality": {
+                "provisional_metrics_present": False,
+                "provisional_strategies": [],
+            },
+            "report_info": {
+                "source_dir": str(Path(tmp) / "polymarket" / "runs"),
+                "source_files": [],
+            },
+        }
+
+        try:
+            reporting.write_report_outputs(report_root=Path(tmp) / "..", summary=summary)
+        except ValueError as exc:
+            assert "report_root" in str(exc)
+        else:  # pragma: no cover
+            raise AssertionError("expected report_root validation failure")

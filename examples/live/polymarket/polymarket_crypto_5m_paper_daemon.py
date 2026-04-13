@@ -29,6 +29,8 @@ import importlib.util
 import json
 import math
 from pathlib import Path
+import random
+import re
 import sys
 import threading
 import uuid
@@ -38,6 +40,7 @@ try:
     from examples.live.polymarket._crypto_5m_support import DEFAULT_GAMMA_BASE_URL
     from examples.live.polymarket._crypto_5m_support import SUPPORTED_ASSETS
     from examples.live.polymarket._crypto_5m_support import resolve_crypto_5m_session
+    from examples.live.polymarket._crypto_5m_support import validate_http_base_url
 except ModuleNotFoundError:
     module_name = "examples.live.polymarket._crypto_5m_support"
     module_path = Path(__file__).resolve().with_name("_crypto_5m_support.py")
@@ -50,6 +53,7 @@ except ModuleNotFoundError:
     DEFAULT_GAMMA_BASE_URL = module.DEFAULT_GAMMA_BASE_URL
     SUPPORTED_ASSETS = module.SUPPORTED_ASSETS
     resolve_crypto_5m_session = module.resolve_crypto_5m_session
+    validate_http_base_url = module.validate_http_base_url
 
 try:
     from examples.live.polymarket.crypto_5m_strategy_library import all_strategy_presets
@@ -91,6 +95,7 @@ from nautilus_trader.test_kit.strategies.tester_exec import ExecTesterConfig
 DEFAULT_OUTPUT_DIR = "/workspace/outputs"
 DEFAULT_RECONNECT_DELAY = 2.0
 DEFAULT_EXECUTION_CUTOFF_SECONDS = 15.0
+_SAFE_PRESET_SET = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class RecoverableDaemonError(RuntimeError):
@@ -133,8 +138,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def build_output_path(*, output_dir: str | Path, preset_set: str, now: datetime) -> Path:
+    root = Path(output_dir)
+    if ".." in root.parts:
+        raise ValueError("output_dir must not contain '..'")
+    if not _SAFE_PRESET_SET.fullmatch(str(preset_set).strip()):
+        raise ValueError("preset_set must contain only letters, numbers, '_' or '-'")
     stamp = now.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return Path(output_dir) / "polymarket" / "runs" / f"overnight_{preset_set}_{stamp}.jsonl"
+    return root.resolve(strict=False) / "polymarket" / "runs" / f"overnight_{preset_set}_{stamp}.jsonl"
+
+
+def _backoff_delay(reconnect_delay: float) -> float:
+    base = max(0.0, float(reconnect_delay))
+    return base + float(random.uniform(0.0, max(0.5, base * 0.5)))
 
 
 def _strategy_presets_for_set(preset_set: str):
@@ -318,7 +333,7 @@ async def _resolve_session(asset: str, gamma_host: str, timeout: float):
     return await resolve_crypto_5m_session(
         asset=asset,
         http_client=http_client,
-        gamma_base_url=gamma_host,
+        gamma_base_url=validate_http_base_url(gamma_host, name="gamma_base_url"),
         timeout=timeout,
     )
 
@@ -370,7 +385,7 @@ async def run_daemon(
                 },
             )
             rounds_completed += 1
-            await backoff(float(reconnect_delay))
+            await backoff(_backoff_delay(reconnect_delay))
             continue
 
         session_id = f"{session.slug}:{rounds_completed + 1}"
@@ -422,7 +437,7 @@ async def run_daemon(
                 },
             )
             rounds_completed += 1
-            await backoff(float(reconnect_delay))
+            await backoff(_backoff_delay(reconnect_delay))
             continue
 
         for row in rows:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC
@@ -195,6 +196,15 @@ class QuoteTickConversionTests(unittest.TestCase):
         self.assertEqual(tick_batch, [])
 
 
+def test_fetch_gamma_market_payload_rejects_invalid_scheme() -> None:
+    with unittest.TestCase().assertRaisesRegex(ValueError, "gamma_host"):
+        recorder._fetch_gamma_market_payload(
+            gamma_host="file:///tmp/evil",
+            slug="btc-updown-5m-1776064800",
+            timeout=10.0,
+        )
+
+
 class BufferedCatalogWriterTests(unittest.TestCase):
     def test_flushes_when_time_threshold_is_hit(self) -> None:
         catalog = _FakeCatalog()
@@ -281,6 +291,58 @@ class RecordOneMarketReconnectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(total_ticks, 1)
         self.assertEqual(len(catalog.batches), 1)
         self.assertEqual(len(catalog.batches[0]), 1)
+
+    async def test_record_one_market_uses_jittered_sleep_after_recoverable_error(self) -> None:
+        catalog = _FakeCatalog()
+        session = _session()
+        connect_factory = _FakeConnectFactory([_FakeWebSocket(error=_FakeConnectionClosed("internal error"))])
+        sleep_mock = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with (
+            patch.object(recorder, "connect", new=connect_factory),
+            patch.object(recorder.asyncio, "sleep", new=sleep_mock),
+            patch.object(recorder.random, "uniform", return_value=0.25),
+            patch.object(recorder, "_write_resolution_snapshot", new=AsyncMock()),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await recorder._record_one_market(
+                    catalog=catalog,
+                    session=session,
+                    gamma_host="https://gamma.test",
+                    wss_url="wss://ws.test",
+                    timeout=10.0,
+                    max_ticks=0,
+                    total_ticks=0,
+                    reconnect_delay=1.0,
+                )
+
+        sleep_mock.assert_awaited_with(1.25)
+
+    async def test_record_one_market_uses_jittered_sleep_after_recoverable_error(self) -> None:
+        catalog = _FakeCatalog()
+        session = _session()
+        connect_factory = _FakeConnectFactory([_FakeWebSocket(error=_FakeConnectionClosed("internal error"))])
+        sleep_mock = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with (
+            patch.object(recorder, "connect", new=connect_factory),
+            patch.object(recorder.asyncio, "sleep", new=sleep_mock),
+            patch.object(recorder.random, "uniform", return_value=0.25),
+            patch.object(recorder, "_write_resolution_snapshot", new=AsyncMock()),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await recorder._record_one_market(
+                    catalog=catalog,
+                    session=session,
+                    gamma_host="https://gamma.test",
+                    wss_url="wss://ws.test",
+                    timeout=10.0,
+                    max_ticks=0,
+                    total_ticks=0,
+                    reconnect_delay=1.0,
+                )
+
+        sleep_mock.assert_awaited_with(1.25)
 
     async def test_record_one_market_raises_non_recoverable_errors(self) -> None:
         catalog = _FakeCatalog()

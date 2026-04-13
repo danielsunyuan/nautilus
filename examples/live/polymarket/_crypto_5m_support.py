@@ -35,3 +35,5 @@ DEFAULT_GAMMA_BASE_URL = _crypto_5m.DEFAULT_GAMMA_BASE_URL
 SUPPORTED_ASSETS = _crypto_5m.SUPPORTED_ASSETS
 build_forward_crypto_5m_slugs = _crypto_5m.build_forward_crypto_5m_slugs
 resolve_crypto_5m_session = _crypto_5m.resolve_crypto_5m_session
+validate_http_base_url = _crypto_5m.validate_http_base_url
+validate_ws_url = _crypto_5m.validate_ws_url

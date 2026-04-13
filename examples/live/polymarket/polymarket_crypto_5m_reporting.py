@@ -24,6 +24,13 @@ from typing import Any
 SCHEMA_VERSION = "1"
 
 
+def _resolve_report_root(report_root: str | Path) -> Path:
+    root = Path(report_root)
+    if ".." in root.parts:
+        raise ValueError("report_root must not contain '..'")
+    return root.resolve(strict=False)
+
+
 def loop_label_from_stem(stem: str) -> str:
     if stem.startswith("overnight_"):
         rest = stem[len("overnight_") :]
@@ -32,7 +39,7 @@ def loop_label_from_stem(stem: str) -> str:
 
 
 def discover_run_paths(report_root: str | Path) -> list[Path]:
-    run_dir = Path(report_root) / "polymarket" / "runs"
+    run_dir = _resolve_report_root(report_root) / "polymarket" / "runs"
     return sorted(run_dir.glob("overnight_*.jsonl"), key=lambda path: path.name)
 
 
@@ -83,7 +90,7 @@ def _default_strategy_row(loop: str, name: str) -> dict[str, Any]:
 
 
 def build_summary(*, report_root: str | Path, now: datetime | None = None) -> dict[str, Any]:
-    root = Path(report_root)
+    root = _resolve_report_root(report_root)
     generated_at = (now or datetime.now(tz=UTC)).astimezone(UTC)
     run_paths = discover_run_paths(root)
     sessions: list[dict[str, Any]] = []
@@ -287,7 +294,7 @@ def render_results_markdown(summary: dict[str, Any]) -> str:
 
 
 def write_report_outputs(*, report_root: str | Path, summary: dict[str, Any]) -> dict[str, Path]:
-    root = Path(report_root) / "polymarket" / "reports"
+    root = _resolve_report_root(report_root) / "polymarket" / "reports"
     root.mkdir(parents=True, exist_ok=True)
     stamp = str(summary["generated_at"]).replace("-", "").replace(":", "").replace("T", "T").replace("Z", "Z")
     stamp = stamp[:15] + "Z" if len(stamp) >= 15 else stamp

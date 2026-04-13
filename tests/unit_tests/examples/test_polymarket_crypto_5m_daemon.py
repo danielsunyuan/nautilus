@@ -14,6 +14,7 @@ import tempfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -289,3 +290,56 @@ def test_build_output_path_uses_recommended_run_directory() -> None:
     )
 
     assert path == Path("/tmp/outputs/polymarket/runs/overnight_quant_20260414T120000Z.jsonl")
+
+
+def test_build_output_path_rejects_escape_in_preset_set() -> None:
+    try:
+        daemon.build_output_path(
+            output_dir=Path("/tmp/outputs"),
+            preset_set="../quant",
+            now=datetime(2026, 4, 14, 12, 0, tzinfo=UTC),
+        )
+    except ValueError as exc:
+        assert "preset_set" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected preset_set validation failure")
+
+
+def test_run_daemon_uses_jittered_backoff_delay(tmp_path: Path) -> None:
+    output_path = tmp_path / "runs.jsonl"
+    resolve_session = AsyncMock(side_effect=RuntimeError("gamma unavailable"))
+    backoff_sleep = AsyncMock()
+
+    with patch.object(daemon.random, "uniform", return_value=0.5):
+        asyncio.run(
+            daemon.run_daemon(
+                asset="BTC",
+                preset_set="quant",
+                resolve_session=resolve_session,
+                run_round=AsyncMock(),
+                sleep_until_next_round=AsyncMock(),
+                writer=daemon.JsonlRunWriter(output_path),
+                now_fn=lambda: datetime(2026, 4, 14, 12, 1, tzinfo=UTC),
+                max_rounds=1,
+                backoff_sleep=backoff_sleep,
+                reconnect_delay=2.0,
+            ),
+        )
+
+    backoff_sleep.assert_awaited_once_with(2.5)
+
+
+def test_strategy_presets_for_supported_sets_cover_all_named_variants() -> None:
+    assert daemon._strategy_presets_for_set("quant")
+    assert daemon._strategy_presets_for_set("grid")
+    assert daemon._strategy_presets_for_set("all")
+    assert daemon._strategy_presets_for_set("advanced")
+    assert daemon._strategy_presets_for_set("momentum")
+    assert daemon._strategy_presets_for_set("flow")
+
+    try:
+        daemon._strategy_presets_for_set("unknown")
+    except ValueError as exc:
+        assert "unsupported preset set" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected unsupported preset set to fail")

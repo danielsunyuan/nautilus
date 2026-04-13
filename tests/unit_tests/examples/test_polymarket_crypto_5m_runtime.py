@@ -228,3 +228,17 @@ def test_crypto_5m_smoke_script_main_wires_resolver_and_sandbox_execution(monkey
     assert captured["built"] is True
     assert captured["ran"] is True
     assert captured["disposed"] is True
+
+
+def test_fetch_crypto_5m_market_rejects_invalid_base_url_scheme() -> None:
+    http_client = MagicMock()
+
+    with pytest.raises(ValueError, match="gamma_base_url"):
+        asyncio.run(
+            crypto_5m.fetch_crypto_5m_market(
+                slug="btc-updown-5m-1776064800",
+                http_client=http_client,
+                gamma_base_url="file:///tmp/evil",
+                timeout=10.0,
+            ),
+        )

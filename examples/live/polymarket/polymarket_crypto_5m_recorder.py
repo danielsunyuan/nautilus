@@ -16,6 +16,7 @@ from decimal import InvalidOperation
 import importlib.util
 import json
 from pathlib import Path
+import random
 import sys
 import time
 from typing import Any
@@ -26,6 +27,8 @@ try:
     from examples.live.polymarket._crypto_5m_support import DEFAULT_GAMMA_BASE_URL
     from examples.live.polymarket._crypto_5m_support import SUPPORTED_ASSETS
     from examples.live.polymarket._crypto_5m_support import resolve_crypto_5m_session
+    from examples.live.polymarket._crypto_5m_support import validate_http_base_url
+    from examples.live.polymarket._crypto_5m_support import validate_ws_url
 except ModuleNotFoundError:
     module_name = "examples.live.polymarket._crypto_5m_support"
     module_path = Path(__file__).resolve().with_name("_crypto_5m_support.py")
@@ -38,6 +41,8 @@ except ModuleNotFoundError:
     DEFAULT_GAMMA_BASE_URL = module.DEFAULT_GAMMA_BASE_URL
     SUPPORTED_ASSETS = module.SUPPORTED_ASSETS
     resolve_crypto_5m_session = module.resolve_crypto_5m_session
+    validate_http_base_url = module.validate_http_base_url
+    validate_ws_url = module.validate_ws_url
 
 try:
     from websockets.asyncio.client import connect
@@ -65,6 +70,11 @@ DEFAULT_CATALOG_PATH = "/data/nautilus_catalog"
 DEFAULT_WSS_MARKET = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 DEFAULT_METADATA_FILE = "polymarket_5m_resolutions.jsonl"
 DEFAULT_RESOLUTION_RETRIES = 3
+
+
+def _backoff_delay(reconnect_delay: float) -> float:
+    base = max(0.0, float(reconnect_delay))
+    return base + float(random.uniform(0.0, max(0.25, base * 0.5)))
 
 
 @dataclass
@@ -327,7 +337,7 @@ def write_market_resolution(
 
 
 def _fetch_gamma_market_payload(*, gamma_host: str, slug: str, timeout: float) -> dict[str, Any]:
-    base = str(gamma_host).rstrip("/")
+    base = validate_http_base_url(gamma_host, name="gamma_host")
     url = f"{base}/markets/slug/{quote(slug)}"
     request = urllib.request.Request(
         url,
@@ -420,7 +430,7 @@ async def _finalize_market(
             )
             if attempt >= max(1, resolution_retries):
                 return
-            await asyncio.sleep(reconnect_delay)
+            await asyncio.sleep(_backoff_delay(reconnect_delay))
 
 
 async def _record_one_market(
@@ -467,7 +477,7 @@ async def _record_one_market(
             return total_ticks
 
         try:
-            async with connect(wss_url, ping_interval=20, ping_timeout=20) as ws:
+            async with connect(validate_ws_url(wss_url, name="wss_url"), ping_interval=20, ping_timeout=20) as ws:
                 await ws.send(json.dumps(subscribe))
                 while True:
                     if datetime.now(tz=UTC) >= session.end_time:
@@ -521,10 +531,10 @@ async def _record_one_market(
                 ),
                 flush=True,
             )
-            await asyncio.sleep(reconnect_delay)
+            await asyncio.sleep(_backoff_delay(reconnect_delay))
             continue
 
-        await asyncio.sleep(reconnect_delay)
+        await asyncio.sleep(_backoff_delay(reconnect_delay))
 
 
 async def _run_asset_loop(
@@ -635,10 +645,10 @@ async def _run_asset_loop(
                 ),
                 flush=True,
             )
-            await asyncio.sleep(reconnect_delay)
+            await asyncio.sleep(_backoff_delay(reconnect_delay))
             continue
 
-        await asyncio.sleep(reconnect_delay)
+        await asyncio.sleep(_backoff_delay(reconnect_delay))
 
 
 def build_parser() -> argparse.ArgumentParser:

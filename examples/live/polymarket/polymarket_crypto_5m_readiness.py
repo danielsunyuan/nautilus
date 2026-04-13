@@ -30,6 +30,31 @@ class ReadinessThresholds:
     require_parity_passed: bool = True
 
 
+def _resolve_report_root(report_root: str | Path) -> Path:
+    root = Path(report_root)
+    if ".." in root.parts:
+        raise ValueError("report_root must not contain '..'")
+    return root.resolve(strict=False)
+
+
+def _require_mapping(payload: Any, *, name: str) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError(f"{name} must be an object")
+    return payload
+
+
+def validate_readiness_payload(payload: Any) -> dict[str, Any]:
+    data = _require_mapping(payload, name="payload")
+    return {
+        "latency_summary": _require_mapping(data.get("latency_summary"), name="latency_summary"),
+        "disconnect_summary": _require_mapping(data.get("disconnect_summary"), name="disconnect_summary"),
+        "cancel_replace_supported": data.get("cancel_replace_supported"),
+        "kill_switch_configured": bool(data.get("kill_switch_configured")),
+        "routing_assumption": str(data.get("routing_assumption") or ""),
+        "parity_passed": bool(data.get("parity_passed")),
+    }
+
+
 def summarize_latency_observations(observations: list[LatencyObservation]) -> dict[str, Any]:
     if not observations:
         return {
@@ -150,7 +175,7 @@ def render_readiness_markdown(report: dict[str, Any]) -> str:
 
 
 def write_readiness_outputs(*, report_root: str | Path, report: dict[str, Any]) -> dict[str, Path]:
-    root = Path(report_root) / "polymarket" / "reports"
+    root = _resolve_report_root(report_root) / "polymarket" / "reports"
     root.mkdir(parents=True, exist_ok=True)
     timestamp = str(report["generated_at"]).replace("-", "").replace(":", "")
     timestamp = timestamp[:15] + "Z" if len(timestamp) >= 15 else timestamp
@@ -177,7 +202,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
-    payload = json.loads(Path(args.input_json).read_text(encoding="utf-8"))
+    payload = validate_readiness_payload(json.loads(Path(args.input_json).read_text(encoding="utf-8")))
     report = assess_live_readiness(
         generated_at=datetime.now(tz=UTC),
         latency_summary=payload["latency_summary"],
