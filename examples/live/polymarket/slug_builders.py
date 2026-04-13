@@ -30,9 +30,25 @@ Usage:
 
 """
 
+import importlib.util
+from pathlib import Path
+import sys
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+
+try:
+    from examples.live.polymarket._crypto_5m_support import build_forward_crypto_5m_slugs
+except ModuleNotFoundError:
+    module_name = "examples.live.polymarket._crypto_5m_support"
+    module_path = Path(__file__).resolve().with_name("_crypto_5m_support.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    build_forward_crypto_5m_slugs = module.build_forward_crypto_5m_slugs
 
 
 def build_btc_updown_slugs() -> list[str]:
@@ -123,48 +139,28 @@ def build_crypto_updown_slugs() -> list[str]:
 
 def build_btc_updown_5m_slugs() -> list[str]:
     """
-    Build slugs for BTC **5-minute** UpDown rounds (current UTC window and the next few).
-
-    Pattern matches Polymarket recurring markets: ``btc-updown-5m-{unix_start}`` where
-    ``unix_start`` is the epoch of the round open, aligned to **300** seconds.
-
-    See also ``examples/live/polymarket/polymarket_crypto_5m_paper_smoke.py`` for a full
-    Docker smoke that resolves ``conditionId`` / token IDs from Gamma.
+    Build slugs for BTC 5-minute UpDown rounds.
 
     Returns
     -------
     list[str]
+        List of event slugs for BTC UpDown markets.
 
     """
-    slugs: list[str] = []
-    now = datetime.now(tz=UTC)
-    epoch = int(now.timestamp())
-    round_start = epoch - (epoch % 300)
-    for i in range(4):
-        ts = round_start + 300 * i
-        slugs.append(f"btc-updown-5m-{ts}")
-    return slugs
+    return build_forward_crypto_5m_slugs(assets=("BTC",), intervals=4)
 
 
 def build_crypto_updown_5m_slugs() -> list[str]:
     """
-    Build slugs for multiple crypto **5-minute** UpDown rounds (BTC, ETH, SOL, …).
+    Build slugs for multiple crypto 5-minute UpDown rounds.
 
     Returns
     -------
     list[str]
+        List of event slugs for crypto UpDown markets.
 
     """
-    cryptos = ["btc", "eth", "sol", "xrp", "doge", "bnb", "hype"]
-    slugs: list[str] = []
-    now = datetime.now(tz=UTC)
-    epoch = int(now.timestamp())
-    round_start = epoch - (epoch % 300)
-    for i in range(2):
-        ts = round_start + 300 * i
-        for crypto in cryptos:
-            slugs.append(f"{crypto}-updown-5m-{ts}")
-    return slugs
+    return build_forward_crypto_5m_slugs(intervals=2)
 
 
 def build_sample_slugs() -> list[str]:

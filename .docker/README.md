@@ -118,6 +118,46 @@ SCAN 0 MATCH '*PAPER-001*'
 
 For a GUI, use Redis Insight to browse the keyspace and stream payloads.
 
+## Polymarket 5m paper-trading daemon
+
+Use the `papertrade-daemon` service when you want the BTC 5-minute paper
+workflow to roll from one round to the next until stopped, while persisting
+JSONL run output under `outputs/polymarket/runs/`.
+
+### Start the daemon
+
+```bash
+docker compose -f .docker/docker-compose.yml up -d nordvpn papertrade-daemon
+```
+
+### Follow daemon logs
+
+```bash
+docker compose -f .docker/docker-compose.yml logs -f papertrade-daemon
+```
+
+### Stop the daemon
+
+```bash
+docker compose -f .docker/docker-compose.yml stop papertrade-daemon
+```
+
+The daemon defaults to:
+
+- asset `BTC`
+- preset set `quant`
+- output path prefix `outputs/polymarket/runs/`
+
+Override the command when you want bounded smoke runs or a different preset set:
+
+```bash
+docker compose -f .docker/docker-compose.yml run --rm papertrade-daemon \
+  python /workspace/examples/live/polymarket/polymarket_crypto_5m_paper_daemon.py \
+  --asset BTC \
+  --preset-set quant \
+  --max-rounds 1
+```
+
 ## Postgres (local testing)
 
 Postgres integration tests run on Linux when a Postgres instance is available.

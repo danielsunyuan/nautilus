@@ -84,6 +84,39 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  papertrade-daemon:
+    container_name: nautilus-papertrade-daemon
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/polymarket/polymarket_crypto_5m_paper_daemon.py
+      - --asset
+      - BTC
+      - --preset-set
+      - quant
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+      - ../.env.polymarket
+    volumes:
+      - ..:/workspace
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
   postgres:
     container_name: nautilus-database
     image: postgres
