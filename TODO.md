@@ -16,7 +16,7 @@ assert 'nordvpn' in compose['services']
 assert compose['services']['papertrade']['network_mode'] == 'service:nordvpn'
 assert compose['services']['papertrade']['build']['dockerfile'] == '.docker/nautilus_trader.dockerfile'
 PY
-  - python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_papertrade.py -q
+  - uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_papertrade.py -q
 
 ### TASK-002: Establish Polymarket 5m convergence governance baseline
 
@@ -27,18 +27,18 @@ PY
 - Output: A convergence baseline note in `docs/plans/` plus task tracking for legs 1-8 in this file.
 - Validation:
   - test -f docs/plans/2026-04-13-polymarket-5m-convergence-baseline.md
-  - rg -n "reference-only|Parity Matrix|Acceptance Commands|Review Protocol" docs/plans/2026-04-13-polymarket-5m-convergence-baseline.md
-  - rg -n "TASK-00[2-9]|TASK-010" TODO.md
+  - grep -nE "reference-only|Parity Matrix|Acceptance Commands|Review Protocol" docs/plans/2026-04-13-polymarket-5m-convergence-baseline.md
+  - grep -nE "TASK-00[2-9]|TASK-010" TODO.md
 
 ### TASK-003: Add reusable Polymarket 5m session resolver
 
 - Description: Promote the 5m smoke logic into reusable Nautilus-side Polymarket session helpers for slug derivation, Gamma resolution, previous-window fallback, and open-market validation.
 - Agent Type: Exchange adapter agent experienced in Polymarket venue integration
-- Status: Pending
+- Status: Completed
 - Dependencies: TASK-002
 - Output: A reusable 5m session/resolver module and tests covering slug math, Gamma payload parsing, and previous-window fallback.
 - Validation:
-  - python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_runtime.py -q -k "slug or fallback or gamma or accepting"
+  - python -m pytest --import-mode=importlib --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_runtime.py -q
 
 ### TASK-004: Add Nautilus-native Polymarket 5m recorder and metadata store
 
@@ -48,7 +48,7 @@ PY
 - Dependencies: TASK-003
 - Output: Recorder/runtime modules plus tests for quote persistence, metadata persistence, reconnect behavior, and size handling.
 - Validation:
-  - python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_recorder.py -q -k "quote or metadata or reconnect or size"
+  - uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_recorder.py -q -k "quote or metadata or reconnect or size"
 
 ### TASK-005: Add Polymarket 5m strategy preset library
 
@@ -58,7 +58,7 @@ PY
 - Dependencies: TASK-003, TASK-004
 - Output: Strategy preset/config modules covering grid, quant filters, spread switch handling, flow and momentum gates, and library-backed stop variants, with `spread_regime` documented as a parity-gap mode instead of a daemon default.
 - Validation:
-  - python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_strategies.py -q
+  - uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_strategies.py -q
 
 ### TASK-006: Add always-on BTC-first paper trading daemon
 
@@ -68,7 +68,7 @@ PY
 - Dependencies: TASK-003, TASK-004, TASK-005
 - Output: Long-running daemon entrypoint, compose wiring, and daemon lifecycle tests.
 - Validation:
-  - python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_daemon.py -q
+  - uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_daemon.py -q
 
 ### TASK-007: Add Nautilus-native Polymarket 5m reporting
 
@@ -78,7 +78,7 @@ PY
 - Dependencies: TASK-004, TASK-005, TASK-006
 - Output: Reporting module and tests for leaderboard parity fields, stop/settlement accounting, and per-strategy aggregation.
 - Validation:
-  - python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_reporting.py -q
+  - uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_reporting.py -q
 
 ### TASK-008: Add multi-asset data readiness
 
@@ -88,7 +88,7 @@ PY
 - Dependencies: TASK-004, TASK-006
 - Output: Multi-asset recorder/session support with tests for concurrent asset collection.
 - Validation:
-  - python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_multi_asset.py -q
+  - uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_multi_asset.py -q
 
 ### TASK-009: Add QA parity replay harness
 
@@ -98,7 +98,7 @@ PY
 - Dependencies: TASK-005, TASK-006, TASK-008
 - Output: Replay harness and parity assertions for entry/no-entry, side, timing, exit reason, and outcome accounting.
 - Validation:
-  - python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_parity.py -q
+  - uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_parity.py -q
 
 ### TASK-010: Add latency and live-readiness gate
 
@@ -108,4 +108,4 @@ PY
 - Dependencies: TASK-006, TASK-009
 - Output: Latency/readiness module or report definitions and tests for timing semantics, disconnect handling, and kill-switch assumptions.
 - Validation:
-  - python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_readiness.py -q
+  - uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_readiness.py -q

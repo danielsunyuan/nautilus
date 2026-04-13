@@ -30,9 +30,25 @@ Usage:
 
 """
 
+import importlib.util
+from pathlib import Path
+import sys
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+
+try:
+    from examples.live.polymarket._crypto_5m_support import build_forward_crypto_5m_slugs
+except ModuleNotFoundError:
+    module_name = "examples.live.polymarket._crypto_5m_support"
+    module_path = Path(__file__).resolve().with_name("_crypto_5m_support.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    build_forward_crypto_5m_slugs = module.build_forward_crypto_5m_slugs
 
 
 def build_btc_updown_slugs() -> list[str]:
@@ -119,6 +135,32 @@ def build_crypto_updown_slugs() -> list[str]:
             slugs.append(slug)
 
     return slugs
+
+
+def build_btc_updown_5m_slugs() -> list[str]:
+    """
+    Build slugs for BTC 5-minute UpDown rounds.
+
+    Returns
+    -------
+    list[str]
+        List of event slugs for BTC UpDown markets.
+
+    """
+    return build_forward_crypto_5m_slugs(assets=("BTC",), intervals=4)
+
+
+def build_crypto_updown_5m_slugs() -> list[str]:
+    """
+    Build slugs for multiple crypto 5-minute UpDown rounds.
+
+    Returns
+    -------
+    list[str]
+        List of event slugs for crypto UpDown markets.
+
+    """
+    return build_forward_crypto_5m_slugs(intervals=2)
 
 
 def build_sample_slugs() -> list[str]:

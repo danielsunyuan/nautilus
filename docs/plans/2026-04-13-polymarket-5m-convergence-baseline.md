@@ -51,24 +51,24 @@ These commands are the intended implementation gates for later legs and should s
 
 - Leg 0 governance baseline:
   - `test -f docs/plans/2026-04-13-polymarket-5m-convergence-baseline.md`
-  - `rg -n "reference-only|Parity Matrix|Acceptance Commands|Review Protocol" docs/plans/2026-04-13-polymarket-5m-convergence-baseline.md`
-  - `rg -n "TASK-00[2-9]|TASK-010" TODO.md`
+  - `grep -nE "reference-only|Parity Matrix|Acceptance Commands|Review Protocol" docs/plans/2026-04-13-polymarket-5m-convergence-baseline.md`
+  - `grep -nE "TASK-00[2-9]|TASK-010" TODO.md`
 - Leg 1 runtime foundation:
-  - `python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_runtime.py -q -k "slug or fallback or gamma or accepting"`
+  - `python -m pytest --import-mode=importlib --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_runtime.py -q`
 - Leg 2 recorder:
-  - `python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_recorder.py -q -k "quote or metadata or reconnect or size"`
+  - `uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_recorder.py -q -k "quote or metadata or reconnect or size"`
 - Leg 3 strategy library:
-  - `python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_strategies.py -q`
+  - `uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_strategies.py -q`
 - Leg 4 daemon:
-  - `python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_daemon.py -q`
+  - `uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_daemon.py -q`
 - Leg 5 reporting:
-  - `python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_reporting.py -q`
+  - `uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_reporting.py -q`
 - Leg 6 multi-asset readiness:
-  - `python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_multi_asset.py -q`
+  - `uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_multi_asset.py -q`
 - Leg 7 parity harness:
-  - `python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_parity.py -q`
+  - `uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_parity.py -q`
 - Leg 8 readiness gate:
-  - `python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_readiness.py -q`
+  - `uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_readiness.py -q`
 
 ## Review Protocol
 
