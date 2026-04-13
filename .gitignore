@@ -101,6 +101,7 @@ claude.config.json
 .cursor/
 .aider*
 .continue/
+.worktrees/
 
 CLAUDE.md
 CODEX.md
