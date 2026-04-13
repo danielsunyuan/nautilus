@@ -44,7 +44,7 @@ PY
 
 - Description: Bring the `polynautilus` recorder behavior into Nautilus as the canonical 5m recorder with `QuoteTick` catalog persistence and Polymarket-specific metadata sidecars.
 - Agent Type: Data engineering / normalization
-- Status: Pending
+- Status: Completed
 - Dependencies: TASK-003
 - Output: Recorder/runtime modules plus tests for quote persistence, metadata persistence, reconnect behavior, and size handling.
 - Validation:
