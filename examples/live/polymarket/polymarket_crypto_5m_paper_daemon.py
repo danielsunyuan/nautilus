@@ -85,8 +85,10 @@ from nautilus_trader.config import LiveExecEngineConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import MessageBusConfig
 from nautilus_trader.config import TradingNodeConfig
+from nautilus_trader.core.datetime import unix_nanos_to_dt
 from nautilus_trader.core.nautilus_pyo3 import HttpClient
 from nautilus_trader.live.node import TradingNode
+from nautilus_trader.model.identifiers import StrategyId
 from nautilus_trader.model.identifiers import TraderId
 from nautilus_trader.test_kit.strategies.tester_exec import ExecTester
 from nautilus_trader.test_kit.strategies.tester_exec import ExecTesterConfig
@@ -246,6 +248,141 @@ def _build_exec_tester(*, preset: Any, instrument_id: Any, order_tag: str) -> Ex
     )
 
 
+def _strategy_id_for_preset(preset: Any) -> StrategyId:
+    return StrategyId(f"PM5M-{preset.name.upper()}")
+
+
+def _as_decimal(value: Any) -> Decimal:
+    if hasattr(value, "as_decimal"):
+        return Decimal(str(value.as_decimal()))
+    return Decimal(str(value))
+
+
+def _iso8601_from_unix_nanos(timestamp_ns: int | None) -> str | None:
+    if not timestamp_ns:
+        return None
+    return unix_nanos_to_dt(int(timestamp_ns)).isoformat()
+
+
+def _position_row(
+    *,
+    position: Any,
+    preset: Any,
+    instrument_id: str,
+    asset: str,
+    slug: str,
+    exit_reason: str,
+    settled: bool,
+) -> dict[str, Any]:
+    shares = float(_as_decimal(position.quantity))
+    entry_price = float(position.avg_px_open)
+    stake = float(Decimal(str(entry_price)) * Decimal(str(shares)))
+    realized_pnl = None
+    if getattr(position, "realized_pnl", None) is not None:
+        realized_pnl = float(position.realized_pnl.as_double())
+
+    return {
+        "event": "strategy_result",
+        "strategy_name": preset.name,
+        "strategy_mode": preset.mode,
+        "rationale": preset.rationale,
+        "runner": "exec_tester",
+        "entry_price": entry_price,
+        "exit_price": float(position.avg_px_close) if getattr(position, "avg_px_close", 0.0) else preset.exit_price,
+        "stop_loss_price": preset.stop_loss_price,
+        "instrument_id": str(instrument_id),
+        "asset": asset,
+        "slug": slug,
+        "exit_reason": exit_reason,
+        "settled": settled,
+        "pnl": realized_pnl,
+        "roi": float(getattr(position, "realized_return", 0.0)),
+        "shares": shares,
+        "stake": stake,
+        "entry_time": _iso8601_from_unix_nanos(getattr(position, "ts_opened", 0)),
+        "exit_time": _iso8601_from_unix_nanos(getattr(position, "ts_closed", 0)),
+        "entry_side": getattr(getattr(position, "entry", None), "name", "BUY").lower(),
+    }
+
+
+def extract_strategy_results(
+    *,
+    cache: Any,
+    presets: tuple[Any, ...] | list[Any],
+    instrument_id: str,
+    asset: str,
+    slug: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for preset in presets:
+        strategy_id = _strategy_id_for_preset(preset)
+        closed_positions = list(
+            cache.positions_closed(
+                instrument_id=instrument_id,
+                strategy_id=strategy_id,
+            ),
+        )
+        if closed_positions:
+            rows.append(
+                _position_row(
+                    position=closed_positions[-1],
+                    preset=preset,
+                    instrument_id=instrument_id,
+                    asset=asset,
+                    slug=slug,
+                    exit_reason="position_closed",
+                    settled=True,
+                ),
+            )
+            continue
+
+        open_positions = list(
+            cache.positions_open(
+                instrument_id=instrument_id,
+                strategy_id=strategy_id,
+            ),
+        )
+        if open_positions:
+            rows.append(
+                _position_row(
+                    position=open_positions[-1],
+                    preset=preset,
+                    instrument_id=instrument_id,
+                    asset=asset,
+                    slug=slug,
+                    exit_reason="position_open",
+                    settled=False,
+                ),
+            )
+            continue
+
+        rows.append(
+            {
+                "event": "strategy_result",
+                "strategy_name": preset.name,
+                "strategy_mode": preset.mode,
+                "rationale": preset.rationale,
+                "runner": "exec_tester",
+                "entry_price": preset.entry_price,
+                "exit_price": preset.exit_price,
+                "stop_loss_price": preset.stop_loss_price,
+                "instrument_id": str(instrument_id),
+                "asset": asset,
+                "slug": slug,
+                "exit_reason": "no_position",
+                "settled": False,
+                "pnl": None,
+                "roi": None,
+                "shares": None,
+                "stake": None,
+                "entry_time": None,
+                "exit_time": None,
+                "entry_side": "up",
+            },
+        )
+    return rows
+
+
 def _run_node_for_duration(*, node: TradingNode, duration_seconds: float) -> None:
     timer = threading.Timer(max(0.1, duration_seconds), node.stop)
     timer.daemon = True
@@ -295,31 +432,13 @@ async def _default_run_round(
     except Exception as exc:  # pragma: no cover - exercised via orchestration wrapper
         raise RecoverableDaemonError(str(exc)) from exc
 
-    return [
-        {
-            "event": "strategy_result",
-            "strategy_name": preset.name,
-            "strategy_mode": preset.mode,
-            "rationale": preset.rationale,
-            "runner": "exec_tester",
-            "entry_price": preset.entry_price,
-            "exit_price": preset.exit_price,
-            "stop_loss_price": preset.stop_loss_price,
-            "instrument_id": str(instrument_id),
-            "asset": asset,
-            "slug": session.slug,
-            "exit_reason": "daemon_window_complete",
-            "settled": False,
-            "pnl": None,
-            "roi": None,
-            "shares": None,
-            "stake": None,
-            "entry_time": None,
-            "exit_time": None,
-            "entry_side": "up",
-        }
-        for preset in presets
-    ]
+    return extract_strategy_results(
+        cache=node.cache,
+        presets=presets,
+        instrument_id=str(instrument_id),
+        asset=asset,
+        slug=session.slug,
+    )
 
 
 async def _sleep_until_next_round(*, session: Any) -> None:

@@ -343,3 +343,77 @@ def test_strategy_presets_for_supported_sets_cover_all_named_variants() -> None:
         assert "unsupported preset set" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected unsupported preset set to fail")
+
+
+def test_extract_strategy_results_uses_real_position_outcomes() -> None:
+    instrument_id = "POLYMARKET.BTC-5M-UP"
+    session = SimpleNamespace(slug="btc-updown-5m-1776168000")
+    presets = [
+        SimpleNamespace(
+            name="entry_95",
+            mode="basic",
+            rationale="baseline",
+            entry_price=0.95,
+            exit_price=0.99,
+            stop_loss_price=0.5,
+        ),
+        SimpleNamespace(
+            name="support_ratio_95",
+            mode="support_ratio",
+            rationale="supportive book",
+            entry_price=0.95,
+            exit_price=0.99,
+            stop_loss_price=0.5,
+        ),
+    ]
+    closed_position = SimpleNamespace(
+        avg_px_open=0.95,
+        avg_px_close=0.99,
+        quantity="10",
+        realized_pnl=SimpleNamespace(as_double=lambda: 0.4),
+        realized_return=0.04211,
+        entry=SimpleNamespace(name="BUY"),
+        ts_opened=1_776_168_000_000_000_000,
+        ts_closed=1_776_168_200_000_000_000,
+        closing_order_id="close-order-1",
+    )
+    open_position = SimpleNamespace(
+        avg_px_open=0.94,
+        avg_px_close=0.0,
+        quantity="7",
+        realized_pnl=None,
+        realized_return=0.0,
+        entry=SimpleNamespace(name="BUY"),
+        ts_opened=1_776_168_050_000_000_000,
+        ts_closed=0,
+        closing_order_id=None,
+    )
+
+    cache = MagicMock()
+    cache.positions_closed.side_effect = lambda **kwargs: [closed_position] if kwargs["strategy_id"].value == "PM5M-ENTRY_95" else []
+    cache.positions_open.side_effect = lambda **kwargs: [open_position] if kwargs["strategy_id"].value == "PM5M-SUPPORT_RATIO_95" else []
+
+    rows = daemon.extract_strategy_results(
+        cache=cache,
+        presets=presets,
+        instrument_id=instrument_id,
+        asset="BTC",
+        slug=session.slug,
+    )
+
+    assert [row["strategy_name"] for row in rows] == ["entry_95", "support_ratio_95"]
+    assert rows[0]["pnl"] == 0.4
+    assert rows[0]["roi"] == 0.04211
+    assert rows[0]["stake"] == 9.5
+    assert rows[0]["shares"] == 10.0
+    assert rows[0]["entry_time"] == "2026-04-14T12:00:00+00:00"
+    assert rows[0]["exit_time"] == "2026-04-14T12:03:20+00:00"
+    assert rows[0]["exit_reason"] == "position_closed"
+    assert rows[0]["settled"] is True
+    assert rows[1]["pnl"] is None
+    assert rows[1]["roi"] == 0.0
+    assert rows[1]["stake"] == 6.58
+    assert rows[1]["shares"] == 7.0
+    assert rows[1]["exit_time"] is None
+    assert rows[1]["exit_reason"] == "position_open"
+    assert rows[1]["settled"] is False
