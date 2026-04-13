@@ -84,7 +84,7 @@ PY
 
 - Description: Extend the recorder and non-executing session infrastructure to all supported 5m assets while keeping phase-1 paper execution BTC-only.
 - Agent Type: Data engineering / orchestration
-- Status: Pending
+- Status: Completed
 - Dependencies: TASK-004, TASK-006
 - Output: Multi-asset recorder/session support with tests for concurrent asset collection.
 - Validation:

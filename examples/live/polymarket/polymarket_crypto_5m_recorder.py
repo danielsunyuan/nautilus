@@ -92,6 +92,20 @@ def _decimal_text(value: Any) -> str | None:
     return text
 
 
+def parse_assets(raw_assets: str) -> tuple[str, ...]:
+    assets = tuple(
+        asset.strip().upper()
+        for asset in str(raw_assets).split(",")
+        if asset.strip()
+    )
+    if not assets:
+        return SUPPORTED_ASSETS
+    unsupported = tuple(asset for asset in assets if asset not in SUPPORTED_ASSETS)
+    if unsupported:
+        raise ValueError(f"unsupported assets: {', '.join(unsupported)}")
+    return assets
+
+
 def build_token_state(session: Any) -> dict[str, _TokenState]:
     return {
         token_id: _TokenState(instrument_id=session.instrument_ids[side], side=side)
@@ -643,11 +657,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def _run(args: argparse.Namespace) -> int:
     catalog = ParquetDataCatalog(str(args.catalog_path))
-    assets = tuple(
-        asset.strip().upper()
-        for asset in str(args.assets).split(",")
-        if asset.strip()
-    )
+    assets = parse_assets(str(args.assets))
     tasks = [
         asyncio.create_task(
             _run_asset_loop(
