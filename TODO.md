@@ -94,7 +94,7 @@ PY
 
 - Description: Compare Nautilus strategy decisions against the current `quant` reference behavior over recorded 5m sessions and define acceptable parity thresholds.
 - Agent Type: QA / simulation
-- Status: Pending
+- Status: Completed
 - Dependencies: TASK-005, TASK-006, TASK-008
 - Output: Replay harness and parity assertions for entry/no-entry, side, timing, exit reason, and outcome accounting.
 - Validation:
