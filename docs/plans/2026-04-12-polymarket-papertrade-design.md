@@ -6,6 +6,8 @@
 
 **Architecture:** Extend the repo-local Compose stack with a `nordvpn` sidecar and a `papertrade` runner service. Add a new Polymarket paper-trading example script that keeps the live `PolymarketDataClientConfig` but swaps execution to `SandboxExecutionClientConfig`, so the strategy can trade against live books without sending live Polymarket orders.
 
+**Persistence note:** The compose stack also includes a local `redis` service so papertrade runs can persist cache and message-bus state for later inspection. Use a stable `TraderId` per algo and inspect the stored keys or streams with `redis-cli` or Redis Insight.
+
 **Tech Stack:** Docker Compose, NautilusTrader Python examples, Polymarket data adapter, Nautilus sandbox execution adapter, pytest.
 
 ---

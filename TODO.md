@@ -13,7 +13,11 @@ import yaml
 from pathlib import Path
 compose = yaml.safe_load(Path('.docker/docker-compose.yml').read_text())
 assert 'nordvpn' in compose['services']
+assert compose['services']['nordvpn']['networks'] == ['nautilus-network']
 assert compose['services']['papertrade']['network_mode'] == 'service:nordvpn'
 assert compose['services']['papertrade']['build']['dockerfile'] == '.docker/nautilus_trader.dockerfile'
+assert compose['services']['redis']['image'] == 'redis:7.2-alpine'
+assert compose['services']['redis']['volumes'] == ['nautilus-redis:/data']
 PY
+  - python -m py_compile examples/live/polymarket/polymarket_paper_tester.py
   - python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_papertrade.py -q

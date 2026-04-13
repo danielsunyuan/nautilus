@@ -1,3 +1,7 @@
+# Compose project label (Docker Desktop / `docker ps` grouping). Without this, the
+# project name defaults to the `.docker` directory basename ("docker").
+name: nautilus
+
 services:
   workspace:
     container_name: nautilus-workspace
@@ -47,6 +51,8 @@ services:
       timeout: 10s
       retries: 8
       start_period: 20s
+    networks:
+      - nautilus-network
     restart: unless-stopped
 
   papertrade:
@@ -114,11 +120,25 @@ services:
 
   redis:
     container_name: nautilus-redis
-    image: redis
+    image: redis:7.2-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - "60"
+      - "1"
+      - --save
+      - "300"
+      - "10"
     security_opt:
       - no-new-privileges:true
     ports:
       - "127.0.0.1:6379:6379"
+    volumes:
+      - nautilus-redis:/data
     restart: unless-stopped
     networks:
       - nautilus-network
@@ -128,4 +148,5 @@ networks:
 
 volumes:
   nautilus-database:
+  nautilus-redis:
   pgadmin:

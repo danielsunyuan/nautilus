@@ -9,7 +9,8 @@ ENV PYTHONUNBUFFERED=1 \
     PYSETUP_PATH="/opt/pysetup" \
     RUSTUP_TOOLCHAIN="stable" \
     BUILD_MODE="release" \
-    CC="clang"
+    CC="clang" \
+    RUST_MIN_STACK="16777216"
 ENV PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
 WORKDIR $PYSETUP_PATH
 
@@ -31,18 +32,19 @@ RUN UV_VERSION=$(bash scripts/uv-version.sh) && curl -LsSf https://astral.sh/uv/
 
 # Install package requirements
 COPY uv.lock pyproject.toml build.py ./
-RUN uv sync --no-install-package nautilus_trader
+RUN uv sync --no-install-package nautilus_trader --extra polymarket
 
 # Build nautilus_trader
 COPY Cargo.toml ./
 COPY Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --lib --release --all-features
+RUN CARGO_BUILD_JOBS=2 cargo build --lib --release --all-features
 
 COPY nautilus_trader ./nautilus_trader
 COPY README.md ./
 RUN uv build --wheel
-RUN uv pip install --system dist/*.whl
+RUN uv pip install --system dist/*.whl "py-clob-client>=0.34.6,<1.0.0" && \
+    python3 -c "import py_clob_client; import nautilus_trader.adapters.polymarket"
 RUN find /usr/local/lib/python3.13/site-packages -name "*.pyc" -exec rm -f {} \;
 
 # Final application image

@@ -7,6 +7,17 @@ if [ -z "$token" ]; then
   exit 1
 fi
 
+if ! pgrep -x nordvpnd >/dev/null 2>&1; then
+  /etc/init.d/nordvpn start >/dev/null
+fi
+
+for _ in 1 2 3 4 5; do
+  if [ -S /run/nordvpn/nordvpnd.sock ]; then
+    break
+  fi
+  sleep 1
+done
+
 nordvpn login --token "$token" >/dev/null
 
 technology="${NORDVPN_TECHNOLOGY:-}"

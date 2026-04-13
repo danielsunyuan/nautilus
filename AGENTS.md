@@ -24,4 +24,6 @@ This repository is worked from a Dockerized development environment.
 - `workspace` is the mutable dev shell built from `.docker/DockerfileUbuntu`.
 - `papertrade` is a prebuilt runner image built from `.docker/nautilus_trader.dockerfile`.
 - If Nautilus package code changes and you need those changes in `papertrade`, rebuild that image before running it.
+- Papertrade results are inspected through the bundled `redis` service when cache/message-bus persistence is enabled; use `docker compose -f .docker/docker-compose.yml exec redis redis-cli`, `SCAN 0 MATCH 'trader-*'`, then `XINFO STREAM` or `XRANGE` on the stream key.
+- Keep one stable `TraderId` per algo so Redis keys and streams stay partitioned across concurrent papertrade runs, and keep `use_instance_id=True` so each run gets a fresh namespace instead of reloading stale sandbox state.
 - Credentials remain in local `.env*` files and are injected into the workspace container through Compose; never print secret values.

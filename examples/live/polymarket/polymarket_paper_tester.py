@@ -18,8 +18,11 @@ from nautilus_trader.adapters.polymarket.common.symbol import get_polymarket_ins
 from nautilus_trader.adapters.polymarket.providers import PolymarketInstrumentProviderConfig
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
+from nautilus_trader.config import CacheConfig
+from nautilus_trader.config import DatabaseConfig
 from nautilus_trader.config import LiveExecEngineConfig
 from nautilus_trader.config import LoggingConfig
+from nautilus_trader.config import MessageBusConfig
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import TraderId
@@ -40,8 +43,32 @@ config_node = TradingNodeConfig(
     trader_id=TraderId("PAPER-001"),
     logging=LoggingConfig(log_level="INFO", use_pyo3=True),
     exec_engine=LiveExecEngineConfig(
+        load_cache=False,
         reconciliation=False,
         open_check_interval_secs=5.0,
+        snapshot_orders=True,
+        snapshot_positions=True,
+        snapshot_positions_interval_secs=5.0,
+    ),
+    cache=CacheConfig(
+        database=DatabaseConfig(host="redis", port=6379),
+        timestamps_as_iso8601=True,
+        persist_account_events=True,
+        buffer_interval_ms=100,
+        flush_on_start=False,
+        use_instance_id=True,
+    ),
+    message_bus=MessageBusConfig(
+        database=DatabaseConfig(host="redis", port=6379),
+        timestamps_as_iso8601=True,
+        buffer_interval_ms=100,
+        streams_prefix="polymarket",
+        use_trader_prefix=True,
+        use_trader_id=True,
+        use_instance_id=True,
+        stream_per_topic=False,
+        autotrim_mins=60,
+        heartbeat_interval_secs=1,
     ),
     data_clients={
         POLYMARKET: PolymarketDataClientConfig(

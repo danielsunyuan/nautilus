@@ -121,6 +121,52 @@ def build_crypto_updown_slugs() -> list[str]:
     return slugs
 
 
+def build_btc_updown_5m_slugs() -> list[str]:
+    """
+    Build slugs for BTC **5-minute** UpDown rounds (current UTC window and the next few).
+
+    Pattern matches Polymarket recurring markets: ``btc-updown-5m-{unix_start}`` where
+    ``unix_start`` is the epoch of the round open, aligned to **300** seconds.
+
+    See also ``examples/live/polymarket/polymarket_crypto_5m_paper_smoke.py`` for a full
+    Docker smoke that resolves ``conditionId`` / token IDs from Gamma.
+
+    Returns
+    -------
+    list[str]
+
+    """
+    slugs: list[str] = []
+    now = datetime.now(tz=UTC)
+    epoch = int(now.timestamp())
+    round_start = epoch - (epoch % 300)
+    for i in range(4):
+        ts = round_start + 300 * i
+        slugs.append(f"btc-updown-5m-{ts}")
+    return slugs
+
+
+def build_crypto_updown_5m_slugs() -> list[str]:
+    """
+    Build slugs for multiple crypto **5-minute** UpDown rounds (BTC, ETH, SOL, …).
+
+    Returns
+    -------
+    list[str]
+
+    """
+    cryptos = ["btc", "eth", "sol", "xrp", "doge", "bnb", "hype"]
+    slugs: list[str] = []
+    now = datetime.now(tz=UTC)
+    epoch = int(now.timestamp())
+    round_start = epoch - (epoch % 300)
+    for i in range(2):
+        ts = round_start + 300 * i
+        for crypto in cryptos:
+            slugs.append(f"{crypto}-updown-5m-{ts}")
+    return slugs
+
+
 def build_sample_slugs() -> list[str]:
     """
     Build a list of sample slugs for testing.
