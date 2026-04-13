@@ -64,7 +64,7 @@ PY
 
 - Description: Build a Nautilus paper trading daemon that rolls across 5-minute BTC markets until stopped, keeps strategy namespaces isolated, and persists run metadata.
 - Agent Type: Execution / routing
-- Status: Pending
+- Status: Completed
 - Dependencies: TASK-003, TASK-004, TASK-005
 - Output: Long-running daemon entrypoint, compose wiring, and daemon lifecycle tests.
 - Validation:
