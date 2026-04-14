@@ -72,6 +72,21 @@ except ModuleNotFoundError:
     entry_grid_strategy_presets = module.entry_grid_strategy_presets
     first_wave_strategy_presets = module.first_wave_strategy_presets
 
+try:
+    from examples.live.polymarket.crypto_5m_live_strategy import PolymarketCrypto5mPaperStrategy
+    from examples.live.polymarket.crypto_5m_live_strategy import PolymarketCrypto5mPaperStrategyConfig
+except ModuleNotFoundError:
+    module_name = "examples.live.polymarket.crypto_5m_live_strategy"
+    module_path = Path(__file__).resolve().with_name("crypto_5m_live_strategy.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    PolymarketCrypto5mPaperStrategy = module.PolymarketCrypto5mPaperStrategy
+    PolymarketCrypto5mPaperStrategyConfig = module.PolymarketCrypto5mPaperStrategyConfig
+
 from nautilus_trader.adapters.polymarket import POLYMARKET
 from nautilus_trader.adapters.polymarket import POLYMARKET_VENUE
 from nautilus_trader.adapters.polymarket import PolymarketDataClientConfig
@@ -90,10 +105,6 @@ from nautilus_trader.core.nautilus_pyo3 import HttpClient
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import StrategyId
 from nautilus_trader.model.identifiers import TraderId
-from nautilus_trader.test_kit.strategies.tester_exec import ExecTester
-from nautilus_trader.test_kit.strategies.tester_exec import ExecTesterConfig
-
-
 DEFAULT_OUTPUT_DIR = "/workspace/outputs"
 DEFAULT_RECONNECT_DELAY = 2.0
 DEFAULT_EXECUTION_CUTOFF_SECONDS = 15.0
@@ -226,24 +237,16 @@ def build_daemon_node_config(
     )
 
 
-def _build_exec_tester(*, preset: Any, instrument_id: Any, order_tag: str) -> ExecTester:
-    return ExecTester(
-        config=ExecTesterConfig(
+def _build_paper_strategy(*, preset: Any, instrument_id: Any, market_end_time: datetime) -> PolymarketCrypto5mPaperStrategy:
+    return PolymarketCrypto5mPaperStrategy(
+        config=PolymarketCrypto5mPaperStrategyConfig(
             strategy_id=f"PM5M-{preset.name.upper()}",
-            order_id_tag=order_tag,
             instrument_id=instrument_id,
-            external_order_claims=[instrument_id],
-            subscribe_quotes=True,
-            subscribe_trades=True,
-            enable_limit_sells=False,
-            tob_offset_ticks=10,
+            preset=preset,
+            market_end_time=market_end_time,
             order_qty=Decimal(10),
-            use_post_only=False,
-            reduce_only_on_stop=False,
-            cancel_orders_on_stop=True,
+            token_side="up",
             close_positions_on_stop=True,
-            log_data=False,
-            can_unsubscribe=False,
         ),
     )
 
@@ -286,7 +289,7 @@ def _position_row(
         "strategy_name": preset.name,
         "strategy_mode": preset.mode,
         "rationale": preset.rationale,
-        "runner": "exec_tester",
+        "runner": "polymarket_crypto_5m_paper_strategy",
         "entry_price": entry_price,
         "exit_price": float(position.avg_px_close) if getattr(position, "avg_px_close", 0.0) else preset.exit_price,
         "stop_loss_price": preset.stop_loss_price,
@@ -362,7 +365,7 @@ def extract_strategy_results(
                 "strategy_name": preset.name,
                 "strategy_mode": preset.mode,
                 "rationale": preset.rationale,
-                "runner": "exec_tester",
+                "runner": "polymarket_crypto_5m_paper_strategy",
                 "entry_price": preset.entry_price,
                 "exit_price": preset.exit_price,
                 "stop_loss_price": preset.stop_loss_price,
@@ -410,12 +413,12 @@ async def _default_run_round(
         cache_port=6379,
     )
     node = TradingNode(config=config)
-    for index, preset in enumerate(presets, start=1):
+    for preset in presets:
         node.trader.add_strategy(
-            _build_exec_tester(
+            _build_paper_strategy(
                 preset=preset,
                 instrument_id=instrument_id,
-                order_tag=f"{index:02d}",
+                market_end_time=session.end_time,
             ),
         )
     node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
