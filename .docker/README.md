@@ -74,6 +74,12 @@ level Nautilus changes reflected in the runner:
 docker compose -f .docker/docker-compose.yml build papertrade
 ```
 
+The compose file mounts repo-root `outputs/` into `/workspace/outputs` as a
+writable path for papertrade and daemon JSONL/report artifacts while keeping the
+rest of the `papertrade` repo mount read-only.
+The `papertrade` and `papertrade-daemon` services also default to running as
+`${UID:-1000}:${GID:-1000}` so generated artifacts stay writable on the host.
+
 ## Redis-backed persistence
 
 The compose stack also starts a local `redis` service for Nautilus cache and

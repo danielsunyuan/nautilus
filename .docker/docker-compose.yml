@@ -60,6 +60,7 @@ services:
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
     working_dir: /opt/pysetup
     command:
       - python
@@ -72,6 +73,7 @@ services:
       - ../.env.polymarket
     volumes:
       - ..:/workspace:ro
+      - ../outputs:/workspace/outputs
     network_mode: "service:nordvpn"
     depends_on:
       nordvpn:
@@ -89,6 +91,7 @@ services:
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
     working_dir: /opt/pysetup
     command:
       - python
@@ -105,6 +108,7 @@ services:
       - ../.env.polymarket
     volumes:
       - ..:/workspace
+      - ../outputs:/workspace/outputs
     network_mode: "service:nordvpn"
     depends_on:
       nordvpn:
