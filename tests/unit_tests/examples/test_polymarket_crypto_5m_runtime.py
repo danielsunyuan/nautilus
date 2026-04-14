@@ -138,7 +138,20 @@ def test_validate_crypto_5m_market_rejects_closed_or_non_accepting_markets() -> 
         )
 
 
-def test_resolve_crypto_5m_session_falls_back_to_previous_window_when_current_missing() -> None:
+def test_validate_crypto_5m_market_rejects_expired_markets() -> None:
+    session = crypto_5m.parse_crypto_5m_market(
+        _market_payload(endDateIso="2026-04-12T12:05:00Z"),
+        asset="BTC",
+    )
+
+    with pytest.raises(ValueError, match="expired"):
+        crypto_5m.validate_crypto_5m_market(
+            session,
+            now=datetime(2026, 4, 12, 12, 6, tzinfo=UTC),
+        )
+
+
+def test_resolve_crypto_5m_session_rejects_expired_previous_window_fallback() -> None:
     now = datetime(2026, 4, 12, 12, 7, 11, tzinfo=UTC)
     http_client = MagicMock()
     http_client.get = AsyncMock(
@@ -148,16 +161,15 @@ def test_resolve_crypto_5m_session_falls_back_to_previous_window_when_current_mi
         ],
     )
 
-    session = asyncio.run(
-        crypto_5m.resolve_crypto_5m_session(
-            asset="BTC",
-            http_client=http_client,
-            now=now,
-        ),
-    )
+    with pytest.raises(RuntimeError, match="could not resolve a live 5m market"):
+        asyncio.run(
+            crypto_5m.resolve_crypto_5m_session(
+                asset="BTC",
+                http_client=http_client,
+                now=now,
+            ),
+        )
 
-    assert session.slug == "btc-updown-5m-1775995200"
-    assert session.token_ids["up"] == "up-token"
     assert http_client.get.await_count == 2
 
 

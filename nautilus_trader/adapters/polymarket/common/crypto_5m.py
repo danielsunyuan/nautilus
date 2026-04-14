@@ -211,7 +211,11 @@ def parse_crypto_5m_market(payload: dict[str, Any], *, asset: str) -> Polymarket
     )
 
 
-def validate_crypto_5m_market(session: PolymarketCrypto5mSession) -> None:
+def validate_crypto_5m_market(
+    session: PolymarketCrypto5mSession,
+    *,
+    now: datetime | None = None,
+) -> None:
     if session.closed is True:
         raise ValueError(f"market {session.slug!r} is closed")
     if session.archived is True:
@@ -220,6 +224,11 @@ def validate_crypto_5m_market(session: PolymarketCrypto5mSession) -> None:
         raise ValueError(f"market {session.slug!r} is inactive")
     if session.accepting_orders is not True:
         raise ValueError(f"market {session.slug!r} is not accepting orders")
+    resolved_now = now or datetime.now(tz=UTC)
+    if session.end_time <= resolved_now:
+        raise ValueError(
+            f"market {session.slug!r} is expired at {session.end_time.isoformat()}",
+        )
 
 
 async def fetch_crypto_5m_market(
@@ -276,7 +285,7 @@ async def resolve_crypto_5m_session(
             )
             session = parse_crypto_5m_market(payload, asset=asset)
             if validate_open:
-                validate_crypto_5m_market(session)
+                validate_crypto_5m_market(session, now=resolved_now)
             return session
         except (RuntimeError, ValueError) as exc:
             last_error = exc
