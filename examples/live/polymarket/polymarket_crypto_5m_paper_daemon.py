@@ -237,15 +237,22 @@ def build_daemon_node_config(
     )
 
 
-def _build_paper_strategy(*, preset: Any, instrument_id: Any, market_end_time: datetime) -> PolymarketCrypto5mPaperStrategy:
+def _build_paper_strategy(
+    *,
+    preset: Any,
+    instrument_id: Any,
+    market_end_time: datetime,
+    order_qty: Decimal = Decimal(10),
+    token_side: str = "up",
+) -> PolymarketCrypto5mPaperStrategy:
     return PolymarketCrypto5mPaperStrategy(
         config=PolymarketCrypto5mPaperStrategyConfig(
             strategy_id=f"PM5M-{preset.name.upper()}",
             instrument_id=instrument_id,
             preset=preset,
             market_end_time=market_end_time,
-            order_qty=Decimal(10),
-            token_side="up",
+            order_qty=Decimal(str(order_qty)),
+            token_side=str(token_side),
             close_positions_on_stop=True,
         ),
     )

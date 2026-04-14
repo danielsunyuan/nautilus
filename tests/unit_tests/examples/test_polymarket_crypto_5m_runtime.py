@@ -5,6 +5,7 @@ from argparse import Namespace
 from contextlib import contextmanager
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
 import importlib.util
 from pathlib import Path
 import sys
@@ -118,6 +119,20 @@ def test_parse_crypto_5m_market_builds_token_and_instrument_maps() -> None:
     assert session.token_ids == {"up": "up-token", "down": "down-token"}
     assert str(session.instrument_ids["up"]) == "condition-123-up-token.POLYMARKET"
     assert str(session.instrument_ids["down"]) == "condition-123-down-token.POLYMARKET"
+    assert session.round_start == datetime(2026, 4, 13, 7, 20, tzinfo=UTC)
+    assert session.end_time == datetime(2026, 4, 13, 7, 25, tzinfo=UTC)
+
+
+def test_parse_crypto_5m_market_prefers_slug_derived_end_time_over_stale_gamma_end_date() -> None:
+    session = crypto_5m.parse_crypto_5m_market(
+        _market_payload(
+            slug="btc-updown-5m-1775995200",
+            endDateIso="2026-04-12T00:00:00Z",
+        ),
+        asset="BTC",
+    )
+
+    assert session.round_start == datetime(2026, 4, 12, 12, 0, tzinfo=UTC)
     assert session.end_time == datetime(2026, 4, 12, 12, 5, tzinfo=UTC)
 
 
@@ -147,7 +162,7 @@ def test_validate_crypto_5m_market_rejects_expired_markets() -> None:
     with pytest.raises(ValueError, match="expired"):
         crypto_5m.validate_crypto_5m_market(
             session,
-            now=datetime(2026, 4, 12, 12, 6, tzinfo=UTC),
+            now=datetime(2026, 4, 13, 7, 26, tzinfo=UTC),
         )
 
 
@@ -195,51 +210,33 @@ def test_crypto_5m_smoke_script_main_wires_resolver_and_sandbox_execution(monkey
                 gamma_host="https://gamma.test",
                 timeout=10.0,
                 side="up",
+                preset_set="quant",
+                order_qty=Decimal("5"),
+                execution_cutoff_seconds=15.0,
             )
-
-    class _DummyNode:
-        def __init__(self, config):
-            captured["node_config"] = config
-            self.trader = SimpleNamespace(add_strategy=lambda strategy: captured.setdefault("strategy", strategy))
-
-        def add_data_client_factory(self, venue, factory) -> None:
-            captured["data_factory"] = (venue, factory)
-
-        def add_exec_client_factory(self, venue, factory) -> None:
-            captured["exec_factory"] = (venue, factory)
-
-        def build(self) -> None:
-            captured["built"] = True
-
-        def run(self) -> None:
-            captured["ran"] = True
-
-        def dispose(self) -> None:
-            captured["disposed"] = True
 
     async def _fake_resolve_session(asset: str, gamma_host: str, timeout: float):
         captured["resolve_args"] = (asset, gamma_host, timeout)
         return session
 
-    def _fake_exec_tester(*, config):
-        captured["tester_config"] = config
-        return SimpleNamespace(config=config)
+    async def _fake_run_single_round(**kwargs):
+        captured["round_kwargs"] = kwargs
+        return [{"event": "strategy_result", "strategy_name": "entry_95"}]
 
     monkeypatch.setattr(smoke_script, "_build_parser", lambda: _Parser())
     monkeypatch.setattr(smoke_script, "_resolve_session", _fake_resolve_session)
-    monkeypatch.setattr(smoke_script, "TradingNode", _DummyNode)
-    monkeypatch.setattr(smoke_script, "ExecTester", _fake_exec_tester)
+    monkeypatch.setattr(smoke_script, "run_single_round", _fake_run_single_round)
 
     result = smoke_script.main()
 
     assert result == 0
     assert captured["resolve_args"] == ("BTC", "https://gamma.test", 10.0)
-    assert str(captured["tester_config"].instrument_id) == str(session.instrument_ids["up"])
-    assert captured["node_config"].trader_id.value == "PAPER-5M-001"
-    assert smoke_script.POLYMARKET in captured["node_config"].exec_clients
-    assert captured["built"] is True
-    assert captured["ran"] is True
-    assert captured["disposed"] is True
+    assert captured["round_kwargs"]["session"] == session
+    assert captured["round_kwargs"]["asset"] == "BTC"
+    assert captured["round_kwargs"]["preset_set"] == "quant"
+    assert captured["round_kwargs"]["side"] == "up"
+    assert captured["round_kwargs"]["order_qty"] == Decimal("5")
+    assert captured["round_kwargs"]["execution_cutoff_seconds"] == 15.0
 
 
 def test_fetch_crypto_5m_market_rejects_invalid_base_url_scheme() -> None:

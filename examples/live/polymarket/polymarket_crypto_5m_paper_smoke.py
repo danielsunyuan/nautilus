@@ -11,14 +11,17 @@
 Live Polymarket 5-minute crypto Up/Down round with sandbox execution only.
 
 Resolves the current 5-minute market from Gamma with previous-window fallback,
-then attaches the standard ``ExecTester`` to the selected Up/Down instrument.
+then runs a bounded Nautilus paper-trading round on the selected instrument.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import UTC
+from datetime import datetime
 import importlib.util
+import json
 import math
 from pathlib import Path
 import sys
@@ -41,23 +44,33 @@ except ModuleNotFoundError:
     SUPPORTED_ASSETS = module.SUPPORTED_ASSETS
     resolve_crypto_5m_session = module.resolve_crypto_5m_session
 from nautilus_trader.adapters.polymarket import POLYMARKET
-from nautilus_trader.adapters.polymarket import POLYMARKET_VENUE
-from nautilus_trader.adapters.polymarket import PolymarketDataClientConfig
 from nautilus_trader.adapters.polymarket import PolymarketLiveDataClientFactory
-from nautilus_trader.adapters.polymarket.providers import PolymarketInstrumentProviderConfig
-from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
-from nautilus_trader.config import CacheConfig
-from nautilus_trader.config import DatabaseConfig
-from nautilus_trader.config import LiveExecEngineConfig
-from nautilus_trader.config import LoggingConfig
-from nautilus_trader.config import MessageBusConfig
-from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.core.nautilus_pyo3 import HttpClient
 from nautilus_trader.live.node import TradingNode
-from nautilus_trader.model.identifiers import TraderId
-from nautilus_trader.test_kit.strategies.tester_exec import ExecTester
-from nautilus_trader.test_kit.strategies.tester_exec import ExecTesterConfig
+
+try:
+    from examples.live.polymarket.polymarket_crypto_5m_paper_daemon import _build_paper_strategy
+    from examples.live.polymarket.polymarket_crypto_5m_paper_daemon import _run_node_for_duration
+    from examples.live.polymarket.polymarket_crypto_5m_paper_daemon import _strategy_presets_for_set
+    from examples.live.polymarket.polymarket_crypto_5m_paper_daemon import build_daemon_node_config
+    from examples.live.polymarket.polymarket_crypto_5m_paper_daemon import extract_strategy_results
+except ModuleNotFoundError:
+    module_name = "examples.live.polymarket.polymarket_crypto_5m_paper_daemon"
+    module_path = Path(__file__).resolve().with_name("polymarket_crypto_5m_paper_daemon.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    _build_paper_strategy = module._build_paper_strategy
+    _run_node_for_duration = module._run_node_for_duration
+    _strategy_presets_for_set = module._strategy_presets_for_set
+    build_daemon_node_config = module.build_daemon_node_config
+    extract_strategy_results = module.extract_strategy_results
+
+DEFAULT_EXECUTION_CUTOFF_SECONDS = 15.0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -66,6 +79,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gamma-host", default=DEFAULT_GAMMA_BASE_URL, help="Gamma API base URL")
     parser.add_argument("--timeout", type=float, default=15.0, help="HTTP timeout seconds")
     parser.add_argument("--side", choices=("up", "down"), default="up", help="outcome side")
+    parser.add_argument("--preset-set", default="quant", help="strategy preset set to run")
+    parser.add_argument("--order-qty", type=Decimal, default=Decimal(10), help="paper order quantity per strategy")
+    parser.add_argument(
+        "--execution-cutoff-seconds",
+        type=float,
+        default=DEFAULT_EXECUTION_CUTOFF_SECONDS,
+        help="stop this many seconds before market end",
+    )
     return parser
 
 
@@ -76,6 +97,58 @@ async def _resolve_session(asset: str, gamma_host: str, timeout: float):
         http_client=http_client,
         gamma_base_url=gamma_host,
         timeout=timeout,
+    )
+
+
+async def run_single_round(
+    *,
+    session,
+    asset: str,
+    preset_set: str,
+    side: str,
+    order_qty: Decimal | int | float | str,
+    execution_cutoff_seconds: float,
+    now_fn=None,
+) -> list[dict[str, object]]:
+    normalized_side = str(side).strip().lower()
+    if normalized_side not in {"up", "down"}:
+        raise ValueError(f"side must be 'up' or 'down', got {side!r}")
+
+    presets = _strategy_presets_for_set(preset_set)
+    instrument_id = session.instrument_ids[normalized_side]
+    config = build_daemon_node_config(
+        instrument_ids=[str(instrument_id)],
+        trader_id="PAPER-5M-001",
+        cache_host="redis",
+        cache_port=6379,
+    )
+    node = TradingNode(config=config)
+    for preset in presets:
+        node.trader.add_strategy(
+            _build_paper_strategy(
+                preset=preset,
+                instrument_id=instrument_id,
+                market_end_time=session.end_time,
+                order_qty=Decimal(str(order_qty)),
+                token_side=normalized_side,
+            ),
+        )
+    node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
+    node.add_exec_client_factory(POLYMARKET, SandboxLiveExecClientFactory)
+    node.build()
+
+    current_time = now_fn or (lambda: datetime.now(UTC))
+    runtime_seconds = max(
+        1.0,
+        (session.end_time - current_time()).total_seconds() - max(0.0, float(execution_cutoff_seconds)),
+    )
+    await asyncio.to_thread(_run_node_for_duration, node=node, duration_seconds=runtime_seconds)
+    return extract_strategy_results(
+        cache=node.cache,
+        presets=presets,
+        instrument_id=str(instrument_id),
+        asset=asset,
+        slug=session.slug,
     )
 
 
@@ -97,87 +170,22 @@ def main() -> int:
     side = str(args.side)
     instrument_id = session.instrument_ids[side]
     print(f"Using Gamma slug={session.slug!r} instrument_id={instrument_id}")
-
-    instrument_provider_config = PolymarketInstrumentProviderConfig(
-        load_ids=frozenset([str(instrument_id)]),
-    )
-
-    config_node = TradingNodeConfig(
-        trader_id=TraderId("PAPER-5M-001"),
-        logging=LoggingConfig(log_level="INFO", use_pyo3=True),
-        exec_engine=LiveExecEngineConfig(
-            load_cache=False,
-            reconciliation=False,
-            open_check_interval_secs=5.0,
-            snapshot_orders=True,
-            snapshot_positions=True,
-            snapshot_positions_interval_secs=5.0,
-        ),
-        cache=CacheConfig(
-            database=DatabaseConfig(host="redis", port=6379),
-            timestamps_as_iso8601=True,
-            persist_account_events=True,
-            buffer_interval_ms=100,
-            flush_on_start=False,
-            use_instance_id=True,
-        ),
-        message_bus=MessageBusConfig(
-            database=DatabaseConfig(host="redis", port=6379),
-            timestamps_as_iso8601=True,
-            buffer_interval_ms=100,
-            streams_prefix="polymarket",
-            use_trader_prefix=True,
-            use_trader_id=True,
-            use_instance_id=True,
-            stream_per_topic=False,
-            autotrim_mins=60,
-            heartbeat_interval_secs=1,
-        ),
-        data_clients={
-            POLYMARKET: PolymarketDataClientConfig(
-                instrument_config=instrument_provider_config,
-            ),
-        },
-        exec_clients={
-            POLYMARKET: SandboxExecutionClientConfig(
-                venue=POLYMARKET_VENUE,
-                starting_balances=["1_000 USDC"],
-            ),
-        },
-        timeout_connection=20.0,
-        timeout_portfolio=10.0,
-        timeout_disconnection=10.0,
-        timeout_post_stop=5.0,
-    )
-
-    node = TradingNode(config=config_node)
-    tester = ExecTester(
-        config=ExecTesterConfig(
-            instrument_id=instrument_id,
-            external_order_claims=[instrument_id],
-            subscribe_quotes=True,
-            subscribe_trades=True,
-            enable_limit_sells=False,
-            tob_offset_ticks=10,
-            order_qty=Decimal(10),
-            use_post_only=False,
-            reduce_only_on_stop=False,
-            cancel_orders_on_stop=True,
-            close_positions_on_stop=True,
-            log_data=False,
-            can_unsubscribe=False,
-        ),
-    )
-
-    node.trader.add_strategy(tester)
-    node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
-    node.add_exec_client_factory(POLYMARKET, SandboxLiveExecClientFactory)
-    node.build()
-
     try:
-        node.run()
-    finally:
-        node.dispose()
+        rows = asyncio.run(
+            run_single_round(
+                session=session,
+                asset=str(args.asset),
+                preset_set=str(args.preset_set),
+                side=side,
+                order_qty=args.order_qty,
+                execution_cutoff_seconds=float(args.execution_cutoff_seconds),
+            ),
+        )
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    for row in rows:
+        print(json.dumps(row, sort_keys=True))
     return 0
 
 

@@ -191,9 +191,8 @@ def parse_crypto_5m_market(payload: dict[str, Any], *, asset: str) -> Polymarket
         raise ValueError("Gamma market payload missing Up/Down outcomes")
 
     round_start = _parse_round_start(slug)
-    end_time = _parse_datetime(payload.get("endDateIso")) or (
-        round_start + timedelta(seconds=ROUND_INTERVAL_SECONDS)
-    )
+    slug_end_time = round_start + timedelta(seconds=ROUND_INTERVAL_SECONDS)
+    end_time = slug_end_time
 
     return PolymarketCrypto5mSession(
         asset=symbol,
