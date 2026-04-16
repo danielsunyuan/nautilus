@@ -215,6 +215,100 @@ def test_build_summary_counts_round_skipped_file_without_round_start() -> None:
         assert summary["sessions"][0]["rounds"] == 1
 
 
+def test_build_summary_excludes_open_and_invalid_accounting_from_realized_pnl() -> None:
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        run_dir = root / "polymarket" / "runs"
+        _write_jsonl(
+            run_dir / "overnight_edge_20260415T124236Z.jsonl",
+            [
+                {
+                    "event": "round_start",
+                    "session_id": "btc-1:1",
+                    "slug": "btc-updown-5m-1",
+                },
+                {
+                    "event": "strategy_result",
+                    "session_id": "btc-1:1",
+                    "strategy_name": "edge_pullback_75_tight",
+                    "accounting_status": "open",
+                    "entry_price": 0.77,
+                    "entry_time": "2026-04-15T12:49:04Z",
+                    "exit_reason": "position_open",
+                    "pnl": -1.165356,
+                    "roi": -0.15,
+                    "stake": 7.7,
+                    "settled": False,
+                },
+                {
+                    "event": "strategy_result",
+                    "session_id": "btc-1:1",
+                    "strategy_name": "edge_pullback_70_tight",
+                    "accounting_status": "invalid_entry_side",
+                    "entry_side": "sell",
+                    "entry_price": 0.96,
+                    "entry_time": "2026-04-15T13:08:46Z",
+                    "exit_reason": "accounting_invalid",
+                    "pnl": -0.7448,
+                    "roi": -0.01,
+                    "stake": 4.8,
+                    "settled": False,
+                },
+                {
+                    "event": "strategy_result",
+                    "session_id": "btc-1:1",
+                    "strategy_name": "edge_pullback_70_tight",
+                    "accounting_status": "settled",
+                    "entry_in_configured_band": False,
+                    "entry_side": "buy",
+                    "entry_price": 0.69,
+                    "entry_time": "2026-04-15T23:44:13Z",
+                    "exit_reason": "position_closed",
+                    "pnl": -17.425768,
+                    "roi": -0.057,
+                    "stake": 88.0992,
+                    "settled": True,
+                },
+                {
+                    "event": "strategy_result",
+                    "session_id": "btc-1:1",
+                    "strategy_name": "edge_pullback_70_tight",
+                    "accounting_status": "settled",
+                    "entry_side": "buy",
+                    "entry_price": 0.71,
+                    "entry_time": "2026-04-15T13:49:35Z",
+                    "exit_reason": "position_closed",
+                    "pnl": 1.2976,
+                    "roi": 0.35,
+                    "stake": 7.1,
+                    "settled": True,
+                },
+            ],
+        )
+
+        summary = reporting.build_summary(
+            report_root=root,
+            now=datetime(2026, 4, 15, 14, 0, tzinfo=UTC),
+        )
+
+        totals = summary["totals"]
+        assert totals["trades"] == 1
+        assert totals["open_positions"] == 1
+        assert totals["invalid_results"] == 2
+        assert totals["net_pnl"] == 1.2976
+        assert totals["total_stake"] == 7.1
+
+        rows = {row["strategy_name"]: row for row in summary["leaderboard"]}
+        assert rows["edge_pullback_75_tight"]["trades"] == 0
+        assert rows["edge_pullback_75_tight"]["open_positions"] == 1
+        assert rows["edge_pullback_75_tight"]["net_pnl"] == 0.0
+        assert rows["edge_pullback_70_tight"]["trades"] == 1
+        assert rows["edge_pullback_70_tight"]["invalid_results"] == 2
+        assert rows["edge_pullback_70_tight"]["net_pnl"] == 1.2976
+        assert summary["data_quality"]["invalid_accounting_present"] is True
+        assert "edge_pullback_70_tight" in summary["data_quality"]["invalid_accounting_strategies"]
+
+
 def test_render_results_markdown_formats_summary_view() -> None:
     summary = {
         "generated_at": "2026-04-14T13:00:00Z",
@@ -229,6 +323,8 @@ def test_render_results_markdown_formats_summary_view() -> None:
                 "wins": 1,
                 "losses": 1,
                 "no_trade": 0,
+                "open_positions": 0,
+                "invalid_results": 0,
                 "target_exits": 1,
                 "stop_losses": 1,
                 "settled_wins": 0,
@@ -244,6 +340,8 @@ def test_render_results_markdown_formats_summary_view() -> None:
             "wins": 1,
             "losses": 1,
             "no_trade": 0,
+            "open_positions": 0,
+            "invalid_results": 0,
             "target_exits": 1,
             "stop_losses": 1,
             "settled_wins": 0,
@@ -263,7 +361,7 @@ def test_render_results_markdown_formats_summary_view() -> None:
     markdown = reporting.render_results_markdown(summary)
 
     assert "# Polymarket 5m Crypto Paper Trading — Nautilus Results" in markdown
-    assert "| 1 | QUANT | entry_95 | 2 | 2 | 1 | 1 | 0 | 1 | 1 | 0 | 0 | 50% | 0.955 | $+1.0000 | 4.0% |" in markdown
+    assert "| 1 | QUANT | entry_95 | 2 | 2 | 1 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 | 50% | 0.955 | $+1.0000 | 4.0% |" in markdown
     assert "## Notes" in markdown
     assert "Metrics may be provisional until daemon trade accounting is expanded." in markdown
 

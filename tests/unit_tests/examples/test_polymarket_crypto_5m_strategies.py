@@ -41,7 +41,7 @@ def _market_window():
 
 
 def _engine_for(name: str):
-    preset = next(p for p in strategy_library.all_strategy_presets() if p.name == name)
+    preset = next(p for p in strategy_library.research_strategy_presets() if p.name == name)
     return strategy_library.PolymarketCrypto5mSignalEngine(
         preset=preset,
         token_sides={"up-token": "up", "down-token": "down"},
@@ -75,6 +75,21 @@ def test_first_wave_strategy_presets_include_required_names() -> None:
         "late_half_95",
         "flow_bullish_90",
     }.issubset(names)
+
+
+def test_ninety_microstructure_strategy_presets_are_research_only() -> None:
+    presets = strategy_library.ninety_microstructure_strategy_presets()
+    research_names = {preset.name for preset in strategy_library.research_strategy_presets()}
+    all_names = {preset.name for preset in strategy_library.all_strategy_presets()}
+
+    assert [preset.name for preset in presets] == [
+        "ninety_microprice_support",
+        "ninety_flow_imbalance",
+        "ninety_trend_confirmed",
+    ]
+    assert all(preset.stop_loss_price is not None for preset in presets)
+    assert set(preset.name for preset in presets).issubset(research_names)
+    assert not set(preset.name for preset in presets).intersection(all_names)
 
 
 def test_microprice_95_requires_supportive_microprice() -> None:
@@ -293,6 +308,114 @@ def test_momentum_95_requires_upward_reference_momentum() -> None:
     engine.record_reference_mid_price(mid_price=101.0, now=round_start + timedelta(seconds=40))
     allowed = engine.entry_signal(now=round_start + timedelta(seconds=40), market_end=market_end)
     assert allowed is not None
+
+
+def test_ninety_microprice_support_requires_supportive_order_book_momentum() -> None:
+    engine = _engine_for("ninety_microprice_support")
+    round_start, market_end = _market_window()
+
+    engine.record_top_of_book(
+        token_id="up-token",
+        best_bid=0.899,
+        best_ask=0.90,
+        best_bid_size=18.0,
+        best_ask_size=30.0,
+        now=round_start,
+    )
+
+    blocked = engine.entry_signal(now=round_start + timedelta(seconds=1.1), market_end=market_end)
+    assert blocked is None
+
+    engine.record_top_of_book(
+        token_id="up-token",
+        best_bid=0.899,
+        best_ask=0.90,
+        best_bid_size=30.0,
+        best_ask_size=10.0,
+        now=round_start + timedelta(seconds=2.0),
+    )
+
+    allowed = engine.entry_signal(now=round_start + timedelta(seconds=3.2), market_end=market_end)
+    assert allowed is not None
+    assert allowed.side == "up"
+
+
+def test_ninety_flow_imbalance_requires_bid_heavy_flow() -> None:
+    engine = _engine_for("ninety_flow_imbalance")
+    round_start, market_end = _market_window()
+
+    for index, sizes in enumerate(
+        (
+            (10.0, 14.0),
+            (11.0, 15.0),
+            (12.0, 16.0),
+        ),
+    ):
+        engine.record_top_of_book(
+            token_id="up-token",
+            best_bid=0.899,
+            best_ask=0.90,
+            best_bid_size=sizes[0],
+            best_ask_size=sizes[1],
+            now=round_start + timedelta(seconds=index),
+        )
+
+    blocked = engine.entry_signal(now=round_start + timedelta(seconds=3.2), market_end=market_end)
+    assert blocked is None
+
+    engine.record_top_of_book(
+        token_id="up-token",
+        best_bid=0.899,
+        best_ask=0.90,
+        best_bid_size=50.0,
+        best_ask_size=1.0,
+        now=round_start + timedelta(seconds=4.0),
+    )
+
+    allowed = engine.entry_signal(now=round_start + timedelta(seconds=4.2), market_end=market_end)
+    assert allowed is not None
+    assert allowed.side == "up"
+
+
+def test_ninety_trend_confirmed_requires_late_upward_momentum() -> None:
+    engine = _engine_for("ninety_trend_confirmed")
+    round_start, market_end = _market_window()
+
+    for index, mid_price in enumerate((100.0, 100.0, 100.0)):
+        engine.record_reference_mid_price(
+            mid_price=mid_price,
+            now=round_start + timedelta(seconds=index * 10),
+        )
+
+    engine.record_top_of_book(
+        token_id="up-token",
+        best_bid=0.899,
+        best_ask=0.90,
+        best_bid_size=20.0,
+        best_ask_size=18.0,
+        now=round_start + timedelta(seconds=100.0),
+    )
+
+    blocked = engine.entry_signal(now=round_start + timedelta(seconds=100.2), market_end=market_end)
+    assert blocked is None
+
+    for index, mid_price in enumerate((100.0, 100.0, 101.0), start=13):
+        engine.record_reference_mid_price(
+            mid_price=mid_price,
+            now=round_start + timedelta(seconds=index * 10),
+        )
+    engine.record_top_of_book(
+        token_id="up-token",
+        best_bid=0.899,
+        best_ask=0.90,
+        best_bid_size=30.0,
+        best_ask_size=8.0,
+        now=round_start + timedelta(seconds=151.0),
+    )
+
+    allowed = engine.entry_signal(now=round_start + timedelta(seconds=151.2), market_end=market_end)
+    assert allowed is not None
+    assert allowed.side == "up"
 
 
 def test_effective_stop_loss_price_supports_fixed_adaptive_and_trailing_modes() -> None:

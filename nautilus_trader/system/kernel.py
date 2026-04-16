@@ -288,11 +288,13 @@ class NautilusKernel:
         if not config.message_bus or not config.message_bus.database:
             self._msgbus_db = None
         elif config.message_bus.database.type == "redis":
+            self._log.info("Kernel build: creating RedisMessageBusDatabase", color=LogColor.BLUE)
             self._msgbus_db = nautilus_pyo3.RedisMessageBusDatabase(
                 trader_id=nautilus_pyo3.TraderId(self._trader_id.value),
                 instance_id=nautilus_pyo3.UUID4.from_str(self._instance_id.value),
                 config_json=msgspec.json.encode(config.message_bus, enc_hook=msgspec_encoding_hook),
             )
+            self._log.info("Kernel build: RedisMessageBusDatabase created", color=LogColor.BLUE)
         else:
             raise ValueError(
                 f"Unrecognized `config.message_bus.database.type`, was '{config.message_bus.database.type}'. "
@@ -307,6 +309,7 @@ class NautilusKernel:
             cache_db = None
         elif config.cache.database.type == "redis":
             encoding = config.cache.encoding.lower()
+            self._log.info("Kernel build: creating CacheDatabaseAdapter", color=LogColor.BLUE)
             cache_db = CacheDatabaseAdapter(
                 trader_id=self._trader_id,
                 instance_id=self._instance_id,
@@ -317,6 +320,7 @@ class NautilusKernel:
                 ),
                 config=config.cache,
             )
+            self._log.info("Kernel build: CacheDatabaseAdapter created", color=LogColor.BLUE)
         else:
             raise ValueError(
                 f"Unrecognized `config.cache.database.type`, was '{config.cache.database.type}'. "
@@ -340,6 +344,7 @@ class NautilusKernel:
         if self._msgbus_serializer is None:
             self._msgbus_serializer = MsgSpecSerializer(encoding=msgspec.json)
 
+        self._log.info("Kernel build: creating MessageBus", color=LogColor.BLUE)
         self._msgbus = MessageBus(
             trader_id=self._trader_id,
             instance_id=self._instance_id,
@@ -348,20 +353,27 @@ class NautilusKernel:
             database=self._msgbus_db,
             config=config.message_bus,
         )
+        self._log.info("Kernel build: MessageBus created", color=LogColor.BLUE)
 
+        self._log.info("Kernel build: setting up shutdown handling", color=LogColor.BLUE)
         self._setup_shutdown_handling()
+        self._log.info("Kernel build: shutdown handling ready", color=LogColor.BLUE)
 
+        self._log.info("Kernel build: creating Cache", color=LogColor.BLUE)
         self._cache = Cache(
             database=cache_db,
             config=config.cache,
         )
+        self._log.info("Kernel build: Cache created", color=LogColor.BLUE)
 
+        self._log.info("Kernel build: creating Portfolio", color=LogColor.BLUE)
         self._portfolio = Portfolio(
             msgbus=self._msgbus,
             cache=self._cache,
             clock=self._clock,
             config=config.portfolio,
         )
+        self._log.info("Kernel build: Portfolio created", color=LogColor.BLUE)
 
         ########################################################################
         # Data components
@@ -373,6 +385,7 @@ class NautilusKernel:
                     "Try using a `DataEngineConfig`.",
                 )
 
+            self._log.info("Kernel build: creating LiveDataEngine", color=LogColor.BLUE)
             self._data_engine = LiveDataEngine(
                 loop=self.loop,
                 msgbus=self._msgbus,
@@ -380,6 +393,7 @@ class NautilusKernel:
                 clock=self._clock,
                 config=config.data_engine,
             )
+            self._log.info("Kernel build: LiveDataEngine created", color=LogColor.BLUE)
         elif isinstance(config.data_engine, DataEngineConfig):
             if config.environment != Environment.BACKTEST:
                 raise InvalidConfiguration(
@@ -387,12 +401,14 @@ class NautilusKernel:
                     "Try using a `LiveDataEngineConfig`.",
                 )
 
+            self._log.info("Kernel build: creating DataEngine", color=LogColor.BLUE)
             self._data_engine = DataEngine(
                 msgbus=self._msgbus,
                 cache=self._cache,
                 clock=self._clock,
                 config=config.data_engine,
             )
+            self._log.info("Kernel build: DataEngine created", color=LogColor.BLUE)
 
         ########################################################################
         # Risk components
@@ -404,6 +420,7 @@ class NautilusKernel:
                     "Try using a `RiskEngineConfig`.",
                 )
 
+            self._log.info("Kernel build: creating LiveRiskEngine", color=LogColor.BLUE)
             self._risk_engine = LiveRiskEngine(
                 loop=self.loop,
                 portfolio=self._portfolio,
@@ -412,6 +429,7 @@ class NautilusKernel:
                 clock=self._clock,
                 config=config.risk_engine,
             )
+            self._log.info("Kernel build: LiveRiskEngine created", color=LogColor.BLUE)
         elif isinstance(config.risk_engine, RiskEngineConfig):
             if config.environment != Environment.BACKTEST:
                 raise InvalidConfiguration(
@@ -419,6 +437,7 @@ class NautilusKernel:
                     "Try using a `LiveRiskEngineConfig`.",
                 )
 
+            self._log.info("Kernel build: creating RiskEngine", color=LogColor.BLUE)
             self._risk_engine = RiskEngine(
                 portfolio=self._portfolio,
                 msgbus=self._msgbus,
@@ -426,6 +445,7 @@ class NautilusKernel:
                 clock=self._clock,
                 config=config.risk_engine,
             )
+            self._log.info("Kernel build: RiskEngine created", color=LogColor.BLUE)
 
         ########################################################################
         # Execution components
@@ -437,6 +457,7 @@ class NautilusKernel:
                     "Try using an `ExecEngineConfig`.",
                 )
 
+            self._log.info("Kernel build: creating LiveExecutionEngine", color=LogColor.BLUE)
             self._exec_engine = LiveExecutionEngine(
                 loop=self.loop,
                 msgbus=self._msgbus,
@@ -444,6 +465,7 @@ class NautilusKernel:
                 clock=self._clock,
                 config=config.exec_engine,
             )
+            self._log.info("Kernel build: LiveExecutionEngine created", color=LogColor.BLUE)
         elif isinstance(config.exec_engine, ExecEngineConfig):
             if config.environment != Environment.BACKTEST:
                 raise InvalidConfiguration(
@@ -451,17 +473,22 @@ class NautilusKernel:
                     "Try using an `LiveExecEngineConfig`.",
                 )
 
+            self._log.info("Kernel build: creating ExecutionEngine", color=LogColor.BLUE)
             self._exec_engine = ExecutionEngine(
                 msgbus=self._msgbus,
                 cache=self._cache,
                 clock=self._clock,
                 config=config.exec_engine,
             )
+            self._log.info("Kernel build: ExecutionEngine created", color=LogColor.BLUE)
 
         flush_on_start = config.cache is not None and config.cache.flush_on_start
         if config.exec_engine and config.exec_engine.load_cache and not flush_on_start:
+            self._log.info("Kernel build: loading execution cache", color=LogColor.BLUE)
             self.exec_engine.load_cache()
+            self._log.info("Kernel build: execution cache loaded", color=LogColor.BLUE)
 
+        self._log.info("Kernel build: creating OrderEmulator", color=LogColor.BLUE)
         self._emulator = OrderEmulator(
             portfolio=self._portfolio,
             msgbus=self._msgbus,
@@ -469,10 +496,12 @@ class NautilusKernel:
             clock=self._clock,
             config=config.emulator,
         )
+        self._log.info("Kernel build: OrderEmulator created", color=LogColor.BLUE)
 
         ########################################################################
         # Trader
         ########################################################################
+        self._log.info("Kernel build: creating Trader", color=LogColor.BLUE)
         self._trader = Trader(
             trader_id=self._trader_id,
             instance_id=self._instance_id,
@@ -487,6 +516,7 @@ class NautilusKernel:
             has_controller=self._config.controller is not None,
             loop=self._loop,
         )
+        self._log.info("Kernel build: Trader created", color=LogColor.BLUE)
 
         # Add controller
         self._controller: Controller | None = None
@@ -1373,18 +1403,37 @@ class NautilusKernel:
         # reconciled.
         # Thus any delay here will be due to blocking network I/O.
         seconds = self._config.timeout_connection
-        timeout: timedelta = self.clock.utc_now() + timedelta(seconds=seconds)
+        started = self.clock.utc_now()
+        timeout: timedelta = started + timedelta(seconds=seconds)
+        next_status_log = started + timedelta(seconds=1)
+        last_status: tuple[bool, bool] | None = None
 
         while True:
             await asyncio.sleep(0)
+            now = self.clock.utc_now()
 
-            if self.clock.utc_now() >= timeout:
+            data_connected = self._data_engine.check_connected()
+            exec_connected = self._exec_engine.check_connected()
+            status = (data_connected, exec_connected)
+
+            if status != last_status or now >= next_status_log:
+                elapsed = (now - started).total_seconds()
+                self._log.info(
+                    f"Startup wait: engine connections "
+                    f"elapsed={elapsed:.1f}s timeout={seconds}s "
+                    f"data_connected={data_connected} exec_connected={exec_connected}",
+                    color=LogColor.BLUE,
+                )
+                last_status = status
+                next_status_log = now + timedelta(seconds=1)
+
+            if now >= timeout:
                 return False
 
-            if not self._data_engine.check_connected():
+            if not data_connected:
                 continue
 
-            if not self._exec_engine.check_connected():
+            if not exec_connected:
                 continue
 
             break
@@ -1416,15 +1465,32 @@ class NautilusKernel:
         # PnL calculations are completed (maybe waiting on first quotes).
         # Thus any delay here will be due to blocking network I/O.
         seconds = self._config.timeout_portfolio
-        timeout: timedelta = self._clock.utc_now() + timedelta(seconds=seconds)
+        started = self._clock.utc_now()
+        timeout: timedelta = started + timedelta(seconds=seconds)
+        next_status_log = started + timedelta(seconds=1)
+        last_initialized: bool | None = None
 
         while True:
             await asyncio.sleep(0)
+            now = self._clock.utc_now()
 
-            if self._clock.utc_now() >= timeout:
+            initialized = self._portfolio.initialized
+
+            if initialized != last_initialized or now >= next_status_log:
+                elapsed = (now - started).total_seconds()
+                self._log.info(
+                    f"Startup wait: portfolio initialization "
+                    f"elapsed={elapsed:.1f}s timeout={seconds}s "
+                    f"portfolio_initialized={initialized}",
+                    color=LogColor.BLUE,
+                )
+                last_initialized = initialized
+                next_status_log = now + timedelta(seconds=1)
+
+            if now >= timeout:
                 return False
 
-            if not self._portfolio.initialized:
+            if not initialized:
                 continue
 
             break

@@ -53,6 +53,10 @@ class SandboxExecutionClientConfig(LiveExecClientConfig, frozen=True, kw_only=Tr
         If all venue generated identifiers will be random UUID4's.
     use_reduce_only : bool, default True
         If the `reduce_only` execution instruction on orders will be honored.
+    fee_model_path : str, optional
+        Fully qualified path to a custom FeeModel class (e.g.,
+        'nautilus_trader.adapters.polymarket.fee_model.PolymarketFeeModel').
+        If not provided, defaults to MakerTakerFeeModel.
 
     """
 
@@ -73,3 +77,4 @@ class SandboxExecutionClientConfig(LiveExecClientConfig, frozen=True, kw_only=Tr
     use_position_ids: bool = True
     use_random_ids: bool = False
     use_reduce_only: bool = True
+    fee_model_path: str | None = None

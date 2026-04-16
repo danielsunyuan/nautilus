@@ -25,6 +25,7 @@ from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import MessageBusConfig
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
+from nautilus_trader.model.currencies import USDC_POS
 from nautilus_trader.model.identifiers import TraderId
 from nautilus_trader.test_kit.strategies.tester_exec import ExecTester
 from nautilus_trader.test_kit.strategies.tester_exec import ExecTesterConfig
@@ -77,8 +78,11 @@ config_node = TradingNodeConfig(
     },
     exec_clients={
         POLYMARKET: SandboxExecutionClientConfig(
-            venue=POLYMARKET_VENUE,
-            starting_balances=["1_000 USDC"],
+            venue=str(POLYMARKET_VENUE),
+            base_currency=str(USDC_POS),
+            account_type="CASH",
+            starting_balances=[f"1_000 {USDC_POS}"],
+            fee_model_path="nautilus_trader.adapters.polymarket.fee_model.PolymarketFeeModel",
         ),
     },
     timeout_connection=20.0,

@@ -145,3 +145,69 @@ def test_plan_quote_action_returns_exit_when_target_hit() -> None:
     assert action["kind"] == "exit"
     assert action["reason"] == "target"
     assert action["position"] is position
+
+
+def test_plan_quote_action_suppresses_duplicate_exit_after_close_submitted() -> None:
+    round_start = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
+    market_end = round_start + timedelta(minutes=5)
+    preset = next(p for p in strategy_library.first_wave_strategy_presets() if p.name == "entry_95")
+    engine = strategy_library.PolymarketCrypto5mSignalEngine(
+        preset=preset,
+        token_sides={"POLYMARKET.BTC-5M-UP": "up"},
+    )
+    position = SimpleNamespace(
+        avg_px_open=0.95,
+        quantity="10",
+    )
+
+    action, max_bid = live_strategy.plan_quote_action(
+        engine=engine,
+        preset=preset,
+        instrument_id="POLYMARKET.BTC-5M-UP",
+        token_side="up",
+        market_end_time=market_end,
+        now=round_start + timedelta(seconds=100),
+        bid=0.99,
+        ask=1.0,
+        bid_size=20.0,
+        ask_size=20.0,
+        open_position=position,
+        has_inflight_orders=False,
+        exit_submitted=True,
+        max_bid_seen=0.97,
+    )
+
+    assert max_bid == 0.99
+    assert action is None
+
+
+def test_candidate_strategy_rejects_quotes_above_entry_band() -> None:
+    round_start = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
+    market_end = round_start + timedelta(minutes=5)
+    preset = next(
+        p
+        for p in strategy_library.profitability_candidate_strategy_presets()
+        if p.name == "edge_pullback_70"
+    )
+    engine = strategy_library.PolymarketCrypto5mSignalEngine(
+        preset=preset,
+        token_sides={"POLYMARKET.BTC-5M-UP": "up"},
+    )
+
+    action, _ = live_strategy.plan_quote_action(
+        engine=engine,
+        preset=preset,
+        instrument_id="POLYMARKET.BTC-5M-UP",
+        token_side="up",
+        market_end_time=market_end,
+        now=round_start + timedelta(seconds=130),
+        bid=0.93,
+        ask=0.94,
+        bid_size=30.0,
+        ask_size=30.0,
+        open_position=None,
+        has_inflight_orders=False,
+        max_bid_seen=0.0,
+    )
+
+    assert action is None

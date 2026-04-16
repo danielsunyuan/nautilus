@@ -16,7 +16,17 @@ services:
     env_file:
       - ../.env
       - ../.env.polymarket
-      - ../.env.nordvpn
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_CACHE_HOST:-redis}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
+      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
+      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
+      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
+      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
     volumes:
       - ..:/workspace
     networks:
@@ -30,6 +40,7 @@ services:
 
   nordvpn:
     container_name: nautilus-nordvpn
+    profiles: ["vpn"]
     build:
       context: ..
       dockerfile: .docker/nordvpn.dockerfile
@@ -57,6 +68,7 @@ services:
 
   papertrade:
     container_name: nautilus-papertrade
+    image: nautilus-papertrade:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -71,6 +83,98 @@ services:
     env_file:
       - ../.env
       - ../.env.polymarket
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_CACHE_HOST:-redis}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
+      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
+      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
+    volumes:
+      - ..:/workspace:ro
+      - ../outputs:/workspace/outputs
+    networks:
+      - nautilus-network
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  papertrade-daemon:
+    container_name: nautilus-papertrade-daemon
+    image: nautilus-papertrade:latest
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/polymarket/polymarket_crypto_5m_paper_daemon.py
+      - --asset
+      - BTC
+      - --preset-set
+      - ${POLYMARKET_CRYPTO_5M_PRESET_SET:-research}
+      - --max-rounds
+      - ${POLYMARKET_CRYPTO_5M_MAX_ROUNDS:-0}
+      - --execution-cutoff-seconds
+      - ${POLYMARKET_CRYPTO_5M_EXECUTION_CUTOFF_SECONDS:-15}
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+      - ../.env.polymarket
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_CACHE_HOST:-redis}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
+      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
+      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
+    volumes:
+      - ..:/workspace
+      - ../outputs:/workspace/outputs
+    networks:
+      - nautilus-network
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  papertrade-vpn:
+    container_name: nautilus-papertrade-vpn
+    profiles: ["vpn"]
+    image: nautilus-papertrade:latest
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/polymarket/polymarket_paper_tester.py
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+      - ../.env.polymarket
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_VPN_CACHE_HOST:-172.22.0.3}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
+      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
+      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
     volumes:
       - ..:/workspace:ro
       - ../outputs:/workspace/outputs
@@ -86,8 +190,10 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  papertrade-daemon:
-    container_name: nautilus-papertrade-daemon
+  papertrade-daemon-vpn:
+    container_name: nautilus-papertrade-daemon-vpn
+    profiles: ["vpn"]
+    image: nautilus-papertrade:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -99,7 +205,86 @@ services:
       - --asset
       - BTC
       - --preset-set
-      - quant
+      - ${POLYMARKET_CRYPTO_5M_PRESET_SET:-research}
+      - --max-rounds
+      - ${POLYMARKET_CRYPTO_5M_MAX_ROUNDS:-0}
+      - --execution-cutoff-seconds
+      - ${POLYMARKET_CRYPTO_5M_EXECUTION_CUTOFF_SECONDS:-15}
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+      - ../.env.polymarket
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_VPN_CACHE_HOST:-172.22.0.3}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
+      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
+      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
+    volumes:
+      - ..:/workspace
+      - ../outputs:/workspace/outputs
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  crypto-results-reporter:
+    container_name: nautilus-crypto-results-reporter
+    image: nautilus-papertrade:latest
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - sh
+      - -lc
+      - |
+        while true; do
+          python /workspace/examples/live/polymarket/polymarket_crypto_5m_reporting.py --report-root /workspace/outputs || true
+          sleep "$${REPORT_REFRESH_INTERVAL_SECONDS:-60}"
+        done
+    init: true
+    tty: true
+    stdin_open: true
+    environment:
+      REPORT_REFRESH_INTERVAL_SECONDS: ${REPORT_REFRESH_INTERVAL_SECONDS:-60}
+    volumes:
+      - ..:/workspace:ro
+      - ../outputs:/workspace/outputs
+    networks:
+      - nautilus-network
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  weather-daemon-vpn:
+    container_name: nautilus-weather-daemon-vpn
+    profiles: ["vpn"]
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/polymarket/polymarket_weather_daily_temperature_paper_daemon.py
+      - --preset-set
+      - all
+      - --max-rounds
+      - "1"
+      - --output-dir
+      - /workspace/outputs
     init: true
     tty: true
     stdin_open: true
@@ -117,6 +302,41 @@ services:
         condition: service_started
       redis:
         condition: service_started
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  weather-settlement-vpn:
+    container_name: nautilus-weather-settlement-vpn
+    profiles: ["vpn"]
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/polymarket/weather_daily_temperature_settlement.py
+      - --output-dir
+      - /workspace/outputs
+      - --poll-interval
+      - "900"
+      - --report-md
+      - /workspace/WEATHER_DAILY_TEMPERATURE_RESULTS.md
+      - --gamma-host
+      - https://gamma-api.polymarket.com
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+    volumes:
+      - ..:/workspace
+      - ../outputs:/workspace/outputs
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

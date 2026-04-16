@@ -48,10 +48,35 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         return [json.loads(line) for line in handle.read().splitlines() if line.strip()]
 
 
+def _accounting_status(row: dict[str, Any]) -> str:
+    status = row.get("accounting_status")
+    if status and str(status) != "settled":
+        return str(status)
+    exit_reason = row.get("exit_reason")
+    if exit_reason == "position_open":
+        return "open"
+    if exit_reason == "accounting_invalid" or row.get("entry_side") == "sell":
+        return "invalid_entry_side"
+    if row.get("entry_in_configured_band") is False:
+        return "invalid_entry_band"
+    if status:
+        return str(status)
+    if exit_reason == "no_position":
+        return "no_position"
+    return "settled"
+
+
 def _is_trade(row: dict[str, Any]) -> bool:
+    status = _accounting_status(row)
+    if status in {"open", "no_position"} or status.startswith("invalid_"):
+        return False
     if row.get("entered") is not None:
         return bool(row.get("entered"))
-    return row.get("entry_time") not in (None, "")
+    return (
+        row.get("entry_time") not in (None, "")
+        and row.get("pnl") is not None
+        and row.get("stake") is not None
+    )
 
 
 def _rounds_in_rows(rows: list[dict[str, Any]]) -> int:
@@ -78,6 +103,8 @@ def _default_strategy_row(loop: str, name: str) -> dict[str, Any]:
         "wins": 0,
         "losses": 0,
         "no_trade": 0,
+        "open_positions": 0,
+        "invalid_results": 0,
         "target_exits": 0,
         "stop_losses": 0,
         "settled_wins": 0,
@@ -97,6 +124,7 @@ def build_summary(*, report_root: str | Path, now: datetime | None = None) -> di
     strategies: dict[tuple[str, str], dict[str, Any]] = {}
     rounds_by_loop: dict[str, int] = {}
     rounds_skipped = 0
+    invalid_accounting_strategies: set[str] = set()
 
     for path in run_paths:
         rows = _load_jsonl(path)
@@ -116,6 +144,7 @@ def build_summary(*, report_root: str | Path, now: datetime | None = None) -> di
             name = str(row["strategy_name"])
             key = (loop, name)
             aggregate = strategies.setdefault(key, _default_strategy_row(loop, name))
+            accounting_status = _accounting_status(row)
             trade = _is_trade(row)
             pnl = row.get("pnl")
             stake = row.get("stake")
@@ -123,11 +152,24 @@ def build_summary(*, report_root: str | Path, now: datetime | None = None) -> di
             entry_price = row.get("entry_price")
 
             provisional = (
-                not trade
-                and (pnl is None or stake is None)
-                and exit_reason not in ("settled_win", "settled_loss")
+                accounting_status in {"open", "no_position"}
+                or accounting_status.startswith("invalid_")
+                or (
+                    not trade
+                    and (pnl is None or stake is None)
+                    and exit_reason not in ("settled_win", "settled_loss")
+                )
             )
             aggregate["provisional"] = aggregate["provisional"] or provisional
+
+            if accounting_status == "open":
+                aggregate["open_positions"] += 1
+                continue
+
+            if accounting_status.startswith("invalid_"):
+                aggregate["invalid_results"] += 1
+                invalid_accounting_strategies.add(name)
+                continue
 
             if not trade:
                 aggregate["no_trade"] += 1
@@ -190,6 +232,8 @@ def build_summary(*, report_root: str | Path, now: datetime | None = None) -> di
         "wins": sum(row["wins"] for row in leaderboard),
         "losses": sum(row["losses"] for row in leaderboard),
         "no_trade": sum(row["no_trade"] for row in leaderboard),
+        "open_positions": sum(row["open_positions"] for row in leaderboard),
+        "invalid_results": sum(row["invalid_results"] for row in leaderboard),
         "target_exits": sum(row["target_exits"] for row in leaderboard),
         "stop_losses": sum(row["stop_losses"] for row in leaderboard),
         "settled_wins": sum(row["settled_wins"] for row in leaderboard),
@@ -204,6 +248,8 @@ def build_summary(*, report_root: str | Path, now: datetime | None = None) -> di
     notes: list[str] = []
     if provisional_strategies:
         notes.append("Metrics may be provisional until daemon trade accounting is expanded.")
+    if invalid_accounting_strategies:
+        notes.append("Invalid accounting rows are excluded from realized P/L.")
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -219,6 +265,8 @@ def build_summary(*, report_root: str | Path, now: datetime | None = None) -> di
         "data_quality": {
             "provisional_metrics_present": bool(provisional_strategies),
             "provisional_strategies": provisional_strategies,
+            "invalid_accounting_present": bool(invalid_accounting_strategies),
+            "invalid_accounting_strategies": sorted(invalid_accounting_strategies),
         },
     }
 
@@ -260,17 +308,18 @@ def render_results_markdown(summary: dict[str, Any]) -> str:
     md.append("## Strategy Leaderboard (ranked by net PnL)")
     md.append("")
     md.append(
-        "| # | Loop | Strategy | Rounds | Trades | W | L | No Trade | "
+        "| # | Loop | Strategy | Rounds | Trades | W | L | No Trade | Open | Invalid | "
         "Tgt Exit | Stop Loss | Stl Win | Stl Loss | Win % | Avg Entry | Net PnL | ROI |"
     )
     md.append(
-        "|--:|------|----------|-------:|-------:|--:|--:|---------:|"
+        "|--:|------|----------|-------:|-------:|--:|--:|---------:|-----:|--------:|"
         "---------:|----------:|--------:|---------:|------:|----------:|--------:|----:|"
     )
     for row in summary["leaderboard"]:
         md.append(
             f"| {row['rank']} | {row['loop']} | {row['strategy_name']} | {row['rounds']} | {row['trades']} "
-            f"| {row['wins']} | {row['losses']} | {row['no_trade']} | {row['target_exits']} "
+            f"| {row['wins']} | {row['losses']} | {row['no_trade']} | {row.get('open_positions', 0)} "
+            f"| {row.get('invalid_results', 0)} | {row['target_exits']} "
             f"| {row['stop_losses']} | {row['settled_wins']} | {row['settled_losses']} "
             f"| {_fmt_win_rate(row['win_rate'])} | {_fmt_avg_entry(row['avg_entry_price'])} "
             f"| {_fmt_money(float(row['net_pnl']))} | {_fmt_roi(row['roi'])} |"
@@ -278,7 +327,8 @@ def render_results_markdown(summary: dict[str, Any]) -> str:
     totals = summary["totals"]
     md.append(
         f"| | **ALL** | **TOTALS** | **{totals['rounds']}** | **{totals['trades']}** | **{totals['wins']}** "
-        f"| **{totals['losses']}** | **{totals['no_trade']}** | **{totals['target_exits']}** "
+        f"| **{totals['losses']}** | **{totals['no_trade']}** | **{totals.get('open_positions', 0)}** "
+        f"| **{totals.get('invalid_results', 0)}** | **{totals['target_exits']}** "
         f"| **{totals['stop_losses']}** | **{totals['settled_wins']}** | **{totals['settled_losses']}** "
         f"| **{_fmt_win_rate(totals['win_rate'])}** | | **{_fmt_money(float(totals['net_pnl']))}** "
         f"| **{_fmt_roi(totals['roi'])}** |"

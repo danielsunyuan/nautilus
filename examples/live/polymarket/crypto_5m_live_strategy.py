@@ -70,6 +70,7 @@ def plan_quote_action(
     open_position: Any | None,
     has_inflight_orders: bool,
     max_bid_seen: float,
+    exit_submitted: bool = False,
 ) -> tuple[dict[str, Any] | None, float]:
     engine.record_top_of_book(
         token_id=instrument_id,
@@ -85,6 +86,8 @@ def plan_quote_action(
 
     if open_position is not None:
         max_bid_seen = max(max_bid_seen, bid)
+        if exit_submitted:
+            return None, max_bid_seen
         stop_price = effective_stop_loss_price(
             preset=preset,
             entry_price=float(open_position.avg_px_open),
@@ -115,6 +118,8 @@ class PolymarketCrypto5mPaperStrategy(Strategy):
             token_sides={str(config.instrument_id): config.token_side},
         )
         self._max_bid_seen = 0.0
+        self._entry_submitted = False
+        self._exit_submitted = False
 
     def on_start(self) -> None:
         self.instrument = self.cache.instrument(self.config.instrument_id)
@@ -144,15 +149,20 @@ class PolymarketCrypto5mPaperStrategy(Strategy):
             ask_size=ask_size,
             open_position=open_positions[-1] if open_positions else None,
             has_inflight_orders=bool(inflight_orders),
+            exit_submitted=self._exit_submitted,
             max_bid_seen=self._max_bid_seen,
         )
         if action is None:
             return
 
         if action["kind"] == "exit":
+            self._exit_submitted = True
             self.close_position(action["position"])
             return
 
+        if self._entry_submitted:
+            return
+        self._entry_submitted = True
         order = self.order_factory.market(
             instrument_id=self.config.instrument_id,
             order_side=OrderSide.BUY,

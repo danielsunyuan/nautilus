@@ -46,6 +46,7 @@ class PolymarketCrypto5mStrategyPreset:
     microprice_epsilon: float = 0.0
     stability_seconds: float = 0.0
     entry_price_tight: float = 0.0
+    max_entry_price: float = 0.0
     spread_tight: float = 0.0
     flow_window_seconds: float = 10.0
     flow_min_samples: int = 3
@@ -214,6 +215,23 @@ def entry_grid_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...
             min_best_bid_size=5.0,
         )
         for price in (0.89, 0.90, 0.91, 0.92, 0.93, 0.94, 0.95)
+    )
+
+
+def smoke_test_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
+    return (
+        PolymarketCrypto5mStrategyPreset(
+            name="smoke_entry",
+            rationale="Smoke test preset: enter on the first valid live quote.",
+            entry_price=0.01,
+            exit_price=0.99,
+            stop_loss_price=None,
+            min_seconds_before_close=15.0,
+            max_spread=1.0,
+            min_threshold_seconds=0.0,
+            min_supported_bid_price=0.0,
+            min_best_bid_size=0.0,
+        ),
     )
 
 
@@ -415,12 +433,246 @@ def advanced_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
     )
 
 
+def ninety_microstructure_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
+    return (
+        PolymarketCrypto5mStrategyPreset(
+            name="ninety_microprice_support",
+            rationale="90c entry gated by microprice support, depth balance, and a fixed stop loss.",
+            entry_price=0.90,
+            max_entry_price=0.94,
+            exit_price=0.98,
+            stop_loss_price=0.84,
+            min_seconds_before_close=20.0,
+            max_spread=0.012,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.89,
+            min_best_bid_size=0.0,
+            mode="microprice_support",
+            min_seconds_after_open=0.0,
+            min_total_top_size=20.0,
+            microprice_epsilon=0.0015,
+            support_ratio=1.4,
+        ),
+        PolymarketCrypto5mStrategyPreset(
+            name="ninety_flow_imbalance",
+            rationale="90c entry only when recent order-flow imbalance is bid-heavy enough to justify the risk.",
+            entry_price=0.90,
+            max_entry_price=0.95,
+            exit_price=0.98,
+            stop_loss_price=0.84,
+            min_seconds_before_close=20.0,
+            max_spread=0.012,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.89,
+            min_best_bid_size=10.0,
+            mode="flow_imbalance",
+            min_seconds_after_open=0.0,
+            flow_window_seconds=15.0,
+            flow_min_samples=4,
+            flow_min_imbalance=0.25,
+        ),
+        PolymarketCrypto5mStrategyPreset(
+            name="ninety_trend_confirmed",
+            rationale="Late 90c entry that requires trend confirmation, tight spread, and a fixed stop loss.",
+            entry_price=0.90,
+            max_entry_price=0.95,
+            exit_price=0.98,
+            stop_loss_price=0.85,
+            min_seconds_before_close=20.0,
+            max_spread=0.01,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.89,
+            min_best_bid_size=10.0,
+            mode="binance_momentum",
+            min_seconds_after_open=120.0,
+            momentum_window_seconds=30.0,
+            momentum_min_samples=3,
+        ),
+    )
+
+
+def profitability_candidate_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
+    return (
+        PolymarketCrypto5mStrategyPreset(
+            name="edge_pullback_70",
+            rationale="Enter only in the 70-78c band to require enough upside after crypto taker fees.",
+            entry_price=0.70,
+            max_entry_price=0.78,
+            exit_price=0.96,
+            stop_loss_price=0.62,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.68,
+            min_best_bid_size=10.0,
+            min_seconds_after_open=90.0,
+        ),
+        PolymarketCrypto5mStrategyPreset(
+            name="edge_pullback_80",
+            rationale="Enter only in the 80-86c band with a tighter stop and enough room to exit before 99c.",
+            entry_price=0.80,
+            max_entry_price=0.86,
+            exit_price=0.97,
+            stop_loss_price=0.72,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.78,
+            min_best_bid_size=10.0,
+            min_seconds_after_open=90.0,
+        ),
+        PolymarketCrypto5mStrategyPreset(
+            name="edge_pullback_85",
+            rationale="Enter only in the 85-90c band after early round noise, targeting a wider move than 95c scalps.",
+            entry_price=0.85,
+            max_entry_price=0.90,
+            exit_price=0.98,
+            stop_loss_price=0.77,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.83,
+            min_best_bid_size=10.0,
+            min_seconds_after_open=100.0,
+        ),
+        PolymarketCrypto5mStrategyPreset(
+            name="edge_support_80",
+            rationale="Require bid-side depth dominance in the 80-86c band before entering.",
+            entry_price=0.80,
+            max_entry_price=0.86,
+            exit_price=0.97,
+            stop_loss_price=0.72,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.78,
+            min_best_bid_size=0.0,
+            mode="support_ratio",
+            min_seconds_after_open=90.0,
+            min_total_top_size=20.0,
+            support_ratio=1.8,
+        ),
+        PolymarketCrypto5mStrategyPreset(
+            name="edge_microprice_85",
+            rationale="Require microprice and depth support in the 85-90c band.",
+            entry_price=0.85,
+            max_entry_price=0.90,
+            exit_price=0.98,
+            stop_loss_price=0.77,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.83,
+            min_best_bid_size=0.0,
+            mode="microprice_support",
+            min_seconds_after_open=100.0,
+            min_total_top_size=20.0,
+            microprice_epsilon=0.001,
+            support_ratio=1.6,
+        ),
+        PolymarketCrypto5mStrategyPreset(
+            name="edge_flow_80",
+            rationale="Require sustained bid-heavy flow in the 80-86c band.",
+            entry_price=0.80,
+            max_entry_price=0.86,
+            exit_price=0.97,
+            stop_loss_price=0.72,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.78,
+            min_best_bid_size=10.0,
+            mode="flow_imbalance",
+            min_seconds_after_open=90.0,
+            flow_window_seconds=15.0,
+            flow_min_samples=4,
+            flow_min_imbalance=0.3,
+        ),
+        PolymarketCrypto5mStrategyPreset(
+            name="edge_late_85",
+            rationale="Late-round 85-91c entry that avoids early whipsaw and exits before expiry.",
+            entry_price=0.85,
+            max_entry_price=0.91,
+            exit_price=0.98,
+            stop_loss_price=0.78,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.83,
+            min_best_bid_size=10.0,
+            min_seconds_after_open=180.0,
+        ),
+        PolymarketCrypto5mStrategyPreset(
+            name="edge_trailing_75",
+            rationale="Enter 75-82c only, then trail 8 percent below the best bid seen.",
+            entry_price=0.75,
+            max_entry_price=0.82,
+            exit_price=0.97,
+            stop_loss_price=None,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.73,
+            min_best_bid_size=10.0,
+            mode="trailing_stop",
+            min_seconds_after_open=90.0,
+            trail_frac=0.08,
+        ),
+    )
+
+
+def live_edge_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
+    return (
+        PolymarketCrypto5mStrategyPreset(
+            name="edge_pullback_70_tight",
+            rationale="Live edge test: enter 70-74c only after deeper confirmation.",
+            entry_price=0.70,
+            max_entry_price=0.74,
+            exit_price=0.96,
+            stop_loss_price=0.66,
+            min_seconds_before_close=20.0,
+            max_spread=0.01,
+            min_threshold_seconds=3.0,
+            min_supported_bid_price=0.69,
+            min_best_bid_size=15.0,
+            min_seconds_after_open=120.0,
+        ),
+        PolymarketCrypto5mStrategyPreset(
+            name="edge_pullback_75_tight",
+            rationale="Live edge test: enter 75-79c only with tight spread and higher bid support.",
+            entry_price=0.75,
+            max_entry_price=0.79,
+            exit_price=0.97,
+            stop_loss_price=0.70,
+            min_seconds_before_close=20.0,
+            max_spread=0.01,
+            min_threshold_seconds=3.0,
+            min_supported_bid_price=0.74,
+            min_best_bid_size=15.0,
+            min_seconds_after_open=120.0,
+        ),
+    )
+
+
 def all_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
     return (
         *entry_grid_strategy_presets(),
         *first_wave_strategy_presets(),
         *advanced_strategy_presets(),
     )
+
+
+def research_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
+    presets = (
+        *all_strategy_presets(),
+        *ninety_microstructure_strategy_presets(),
+        *profitability_candidate_strategy_presets(),
+        *live_edge_strategy_presets(),
+    )
+    unique: dict[str, PolymarketCrypto5mStrategyPreset] = {}
+    for preset in presets:
+        unique.setdefault(preset.name, preset)
+    return tuple(unique.values())
 
 
 def effective_stop_loss_price(
@@ -561,7 +813,8 @@ class PolymarketCrypto5mSignalEngine:
         if ask is None:
             return False
         entry_floor = self._entry_floor_price(state)
-        if ask < entry_floor or ask >= self.preset.exit_price or ask >= 1.0:
+        max_entry_price = self.preset.max_entry_price or self.preset.exit_price
+        if ask < entry_floor or ask > max_entry_price or ask >= self.preset.exit_price or ask >= 1.0:
             return False
         if (now - round_start).total_seconds() < self.preset.min_seconds_after_open:
             return False

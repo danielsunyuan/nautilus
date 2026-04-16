@@ -23,6 +23,7 @@ from datetime import datetime
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import sys
 from decimal import Decimal
@@ -51,7 +52,7 @@ from nautilus_trader.live.node import TradingNode
 
 try:
     from examples.live.polymarket.polymarket_crypto_5m_paper_daemon import _build_paper_strategy
-    from examples.live.polymarket.polymarket_crypto_5m_paper_daemon import _run_node_for_duration
+    from examples.live.polymarket.polymarket_crypto_5m_paper_daemon import _run_node_until_deadline
     from examples.live.polymarket.polymarket_crypto_5m_paper_daemon import _strategy_presets_for_set
     from examples.live.polymarket.polymarket_crypto_5m_paper_daemon import build_daemon_node_config
     from examples.live.polymarket.polymarket_crypto_5m_paper_daemon import extract_strategy_results
@@ -65,12 +66,14 @@ except ModuleNotFoundError:
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     _build_paper_strategy = module._build_paper_strategy
-    _run_node_for_duration = module._run_node_for_duration
+    _run_node_until_deadline = module._run_node_until_deadline
     _strategy_presets_for_set = module._strategy_presets_for_set
     build_daemon_node_config = module.build_daemon_node_config
     extract_strategy_results = module.extract_strategy_results
 
 DEFAULT_EXECUTION_CUTOFF_SECONDS = 15.0
+DEFAULT_CACHE_HOST = "redis"
+DEFAULT_CACHE_PORT = 6379
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -119,8 +122,8 @@ async def run_single_round(
     config = build_daemon_node_config(
         instrument_ids=[str(instrument_id)],
         trader_id="PAPER-5M-001",
-        cache_host="redis",
-        cache_port=6379,
+        cache_host=os.getenv("NAUTILUS_CACHE_HOST", DEFAULT_CACHE_HOST),
+        cache_port=int(os.getenv("NAUTILUS_CACHE_PORT", str(DEFAULT_CACHE_PORT))),
     )
     node = TradingNode(config=config)
     for preset in presets:
@@ -142,11 +145,12 @@ async def run_single_round(
         1.0,
         (session.end_time - current_time()).total_seconds() - max(0.0, float(execution_cutoff_seconds)),
     )
-    await asyncio.to_thread(_run_node_for_duration, node=node, duration_seconds=runtime_seconds)
+    await _run_node_until_deadline(node=node, duration_seconds=runtime_seconds)
     return extract_strategy_results(
         cache=node.cache,
         presets=presets,
         instrument_id=str(instrument_id),
+        token_side=normalized_side,
         asset=asset,
         slug=session.slug,
     )

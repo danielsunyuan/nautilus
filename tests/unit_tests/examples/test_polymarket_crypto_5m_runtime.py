@@ -101,11 +101,12 @@ def test_current_crypto_5m_market_slug_rounds_down_to_current_window() -> None:
     assert crypto_5m.current_crypto_5m_market_slug(asset="BTC", now=now) == "btc-updown-5m-1775995500"
 
 
-def test_candidate_crypto_5m_market_slugs_include_current_then_previous_window() -> None:
+def test_candidate_crypto_5m_market_slugs_include_current_next_then_previous_window() -> None:
     now = datetime(2026, 4, 12, 12, 7, 11, tzinfo=UTC)
 
     assert crypto_5m.candidate_crypto_5m_market_slugs(asset="BTC", now=now) == [
         "btc-updown-5m-1775995500",
+        "btc-updown-5m-1775995800",
         "btc-updown-5m-1775995200",
     ]
 
@@ -172,6 +173,7 @@ def test_resolve_crypto_5m_session_rejects_expired_previous_window_fallback() ->
     http_client.get = AsyncMock(
         side_effect=[
             _response(404, {"error": "not found"}),
+            _response(404, {"error": "not found"}),
             _response(200, _market_payload(slug="btc-updown-5m-1775995200")),
         ],
     )
@@ -185,6 +187,28 @@ def test_resolve_crypto_5m_session_rejects_expired_previous_window_fallback() ->
             ),
         )
 
+    assert http_client.get.await_count == 3
+
+
+def test_resolve_crypto_5m_session_falls_forward_when_current_market_inactive() -> None:
+    now = datetime(2026, 4, 12, 12, 7, 11, tzinfo=UTC)
+    http_client = MagicMock()
+    http_client.get = AsyncMock(
+        side_effect=[
+            _response(200, _market_payload(slug="btc-updown-5m-1775995500", active=False)),
+            _response(200, _market_payload(slug="btc-updown-5m-1775995800")),
+        ],
+    )
+
+    session = asyncio.run(
+        crypto_5m.resolve_crypto_5m_session(
+            asset="BTC",
+            http_client=http_client,
+            now=now,
+        ),
+    )
+
+    assert session.slug == "btc-updown-5m-1775995800"
     assert http_client.get.await_count == 2
 
 

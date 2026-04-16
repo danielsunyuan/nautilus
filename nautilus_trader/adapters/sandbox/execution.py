@@ -14,10 +14,12 @@
 # -------------------------------------------------------------------------------------------------
 
 import asyncio
+import importlib
 
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 from nautilus_trader.backtest.engine import SimulatedExchange
 from nautilus_trader.backtest.execution_client import BacktestExecClient
+from nautilus_trader.backtest.models import FeeModel
 from nautilus_trader.backtest.models import FillModel
 from nautilus_trader.backtest.models import LatencyModel
 from nautilus_trader.backtest.models import MakerTakerFeeModel
@@ -53,6 +55,31 @@ from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.objects import Currency
 from nautilus_trader.model.objects import Money
 from nautilus_trader.portfolio.base import PortfolioFacade
+
+
+def _load_fee_model(fee_model_path: str | None) -> FeeModel:
+    """
+    Load a fee model from a fully qualified path.
+
+    Parameters
+    ----------
+    fee_model_path : str, optional
+        Fully qualified path to the fee model class
+        (e.g., 'nautilus_trader.adapters.polymarket.fee_model.PolymarketFeeModel').
+
+    Returns
+    -------
+    FeeModel
+        An instance of the fee model.
+
+    """
+    if fee_model_path is None:
+        return MakerTakerFeeModel()
+
+    module_path, class_name = fee_model_path.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    fee_model_cls = getattr(module, class_name)
+    return fee_model_cls()
 
 
 class SandboxExecutionClient(LiveExecutionClient):
@@ -106,6 +133,8 @@ class SandboxExecutionClient(LiveExecutionClient):
 
         self._set_account_id(AccountId(f"{config.venue}-001"))
 
+        fee_model = _load_fee_model(config.fee_model_path)
+
         self.exchange = SimulatedExchange(
             venue=sandbox_venue,
             oms_type=oms_type,
@@ -120,7 +149,7 @@ class SandboxExecutionClient(LiveExecutionClient):
             cache=cache,
             clock=self.test_clock,
             fill_model=FillModel(),
-            fee_model=MakerTakerFeeModel(),
+            fee_model=fee_model,
             latency_model=LatencyModel(0),
             book_type=book_type_from_str(config.book_type),
             frozen_account=config.frozen_account,

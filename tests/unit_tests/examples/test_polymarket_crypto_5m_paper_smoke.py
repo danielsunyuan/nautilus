@@ -87,16 +87,16 @@ def test_run_single_round_uses_bounded_runtime_and_extracts_results(monkeypatch)
         "_build_paper_strategy",
         lambda **kwargs: SimpleNamespace(**kwargs),
     )
-    monkeypatch.setattr(
-        smoke,
-        "extract_strategy_results",
-        lambda **kwargs: [{"event": "strategy_result", "strategy_name": preset.name, "slug": session.slug}],
-    )
+    def _fake_extract_strategy_results(**kwargs):
+        captured["extract_kwargs"] = kwargs
+        return [{"event": "strategy_result", "strategy_name": preset.name, "slug": session.slug}]
 
-    def _fake_run_node_for_duration(*, node, duration_seconds: float) -> None:
+    monkeypatch.setattr(smoke, "extract_strategy_results", _fake_extract_strategy_results)
+
+    async def _fake_run_node_until_deadline(*, node, duration_seconds: float, sleeper=None) -> None:
         captured["duration_seconds"] = duration_seconds
 
-    monkeypatch.setattr(smoke, "_run_node_for_duration", _fake_run_node_for_duration)
+    monkeypatch.setattr(smoke, "_run_node_until_deadline", _fake_run_node_until_deadline)
 
     rows = asyncio.run(
         smoke.run_single_round(
@@ -111,6 +111,7 @@ def test_run_single_round_uses_bounded_runtime_and_extracts_results(monkeypatch)
     )
 
     assert rows == [{"event": "strategy_result", "strategy_name": "entry_95", "slug": session.slug}]
+    assert captured["extract_kwargs"]["token_side"] == "up"
     assert abs(float(captured["duration_seconds"]) - 60.0) < 1e-9
     node.trader.add_strategy.assert_called_once()
     node.build.assert_called_once()

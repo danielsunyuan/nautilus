@@ -15,6 +15,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
+from unittest.mock import Mock
+
+from nautilus_trader.model.identifiers import InstrumentId
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -278,6 +281,11 @@ def test_build_daemon_node_configures_isolated_runtime_namespaces() -> None:
     assert config.message_bus.database.port == 6379
     assert config.message_bus.streams_prefix == "polymarket-5m"
     assert config.message_bus.use_instance_id is True
+    assert type(config.exec_clients[daemon.POLYMARKET].venue) is str
+    assert config.exec_clients[daemon.POLYMARKET].venue == str(daemon.POLYMARKET_VENUE)
+    assert config.exec_clients[daemon.POLYMARKET].base_currency == "USDC.e"
+    assert config.exec_clients[daemon.POLYMARKET].starting_balances == ["1_000 USDC.e"]
+    assert config.exec_clients[daemon.POLYMARKET].account_type == "CASH"
 
 
 def test_build_output_path_uses_recommended_run_directory() -> None:
@@ -332,6 +340,30 @@ def test_run_daemon_uses_jittered_backoff_delay(tmp_path: Path) -> None:
 def test_strategy_presets_for_supported_sets_cover_all_named_variants() -> None:
     assert daemon._strategy_presets_for_set("quant")
     assert daemon._strategy_presets_for_set("grid")
+    research_presets = daemon._strategy_presets_for_set("research")
+    research_names = {preset.name for preset in research_presets}
+    assert len(research_names) == len(research_presets)
+    assert "entry_95" in research_names
+    assert "edge_pullback_70" in research_names
+    assert "edge_support_80" in research_names
+    assert all(
+        preset.stop_loss_price is not None or preset.mode == "trailing_stop"
+        for preset in research_presets
+        if preset.name.startswith("edge_")
+    )
+    edge_presets = daemon._strategy_presets_for_set("edge")
+    edge_names = {preset.name for preset in edge_presets}
+    assert edge_names == {"edge_pullback_70_tight", "edge_pullback_75_tight"}
+    assert edge_names < research_names
+    assert all(name.startswith("edge_") for name in edge_names)
+    assert all(
+        preset.stop_loss_price is not None or preset.mode == "trailing_stop"
+        for preset in edge_presets
+    )
+    smoke_presets = daemon._strategy_presets_for_set("smoke")
+    assert len(smoke_presets) == 1
+    assert smoke_presets[0].name == "smoke_entry"
+    assert smoke_presets[0].entry_price == 0.01
     assert daemon._strategy_presets_for_set("all")
     assert daemon._strategy_presets_for_set("advanced")
     assert daemon._strategy_presets_for_set("momentum")
@@ -369,7 +401,8 @@ def test_extract_strategy_results_uses_real_position_outcomes() -> None:
     closed_position = SimpleNamespace(
         avg_px_open=0.95,
         avg_px_close=0.99,
-        quantity="10",
+        quantity="0",
+        peak_qty="10",
         realized_pnl=SimpleNamespace(as_double=lambda: 0.4),
         realized_return=0.04211,
         entry=SimpleNamespace(name="BUY"),
@@ -389,9 +422,17 @@ def test_extract_strategy_results_uses_real_position_outcomes() -> None:
         closing_order_id=None,
     )
 
+    def _positions_closed(**kwargs):
+        assert isinstance(kwargs["instrument_id"], InstrumentId)
+        return [closed_position] if kwargs["strategy_id"].value == "PM5M-000" else []
+
+    def _positions_open(**kwargs):
+        assert isinstance(kwargs["instrument_id"], InstrumentId)
+        return [open_position] if kwargs["strategy_id"].value == "PM5M-003" else []
+
     cache = MagicMock()
-    cache.positions_closed.side_effect = lambda **kwargs: [closed_position] if kwargs["strategy_id"].value == "PM5M-ENTRY_95" else []
-    cache.positions_open.side_effect = lambda **kwargs: [open_position] if kwargs["strategy_id"].value == "PM5M-SUPPORT_RATIO_95" else []
+    cache.positions_closed.side_effect = _positions_closed
+    cache.positions_open.side_effect = _positions_open
 
     rows = daemon.extract_strategy_results(
         cache=cache,
@@ -399,21 +440,371 @@ def test_extract_strategy_results_uses_real_position_outcomes() -> None:
         instrument_id=instrument_id,
         asset="BTC",
         slug=session.slug,
+        strategy_ids_by_preset={
+            "entry_95_up": daemon.StrategyId("PM5M-000"),
+            "support_ratio_95_up": daemon.StrategyId("PM5M-003"),
+        },
     )
 
-    assert [row["strategy_name"] for row in rows] == ["entry_95", "support_ratio_95"]
+    assert [row["strategy_name"] for row in rows] == ["entry_95_up", "support_ratio_95_up"]
+    assert [row["preset_name"] for row in rows] == ["entry_95", "support_ratio_95"]
+    assert [row["token_side"] for row in rows] == ["up", "up"]
     assert rows[0]["pnl"] == 0.4
     assert rows[0]["roi"] == 0.04211
     assert rows[0]["stake"] == 9.5
     assert rows[0]["shares"] == 10.0
+    assert rows[0]["configured_entry_price"] == 0.95
+    assert rows[0]["configured_max_entry_price"] == 0.99
+    assert rows[0]["accounting_status"] == "settled"
+    assert rows[0]["entry_in_configured_band"] is True
     assert rows[0]["entry_time"] == "2026-04-14T12:00:00+00:00"
     assert rows[0]["exit_time"] == "2026-04-14T12:03:20+00:00"
     assert rows[0]["exit_reason"] == "position_closed"
     assert rows[0]["settled"] is True
     assert rows[1]["pnl"] is None
-    assert rows[1]["roi"] == 0.0
+    assert rows[1]["roi"] is None
     assert rows[1]["stake"] == 6.58
     assert rows[1]["shares"] == 7.0
+    assert rows[1]["configured_entry_price"] == 0.95
+    assert rows[1]["configured_max_entry_price"] == 0.99
+    assert rows[1]["accounting_status"] == "open"
+    assert rows[1]["entry_in_configured_band"] is False
+    assert rows[1]["exit_price"] is None
     assert rows[1]["exit_time"] is None
     assert rows[1]["exit_reason"] == "position_open"
     assert rows[1]["settled"] is False
+
+
+def test_extract_strategy_results_keeps_open_position_pnl_provisional() -> None:
+    instrument_id = "POLYMARKET.BTC-5M-UP"
+    preset = SimpleNamespace(
+        name="edge_pullback_75_tight",
+        mode="basic",
+        rationale="tight edge",
+        entry_price=0.75,
+        max_entry_price=0.79,
+        exit_price=0.97,
+        stop_loss_price=0.70,
+    )
+    open_position = SimpleNamespace(
+        avg_px_open=0.77,
+        avg_px_close=0.76,
+        quantity="10",
+        realized_pnl=SimpleNamespace(as_double=lambda: -1.165356),
+        realized_return=-0.151345,
+        entry=SimpleNamespace(name="BUY"),
+        ts_opened=1_776_257_344_845_981_779,
+        ts_closed=0,
+        closing_order_id=None,
+    )
+
+    cache = MagicMock()
+    cache.positions_closed.return_value = []
+    cache.positions_open.return_value = [open_position]
+
+    rows = daemon.extract_strategy_results(
+        cache=cache,
+        presets=[preset],
+        instrument_id=instrument_id,
+        asset="BTC",
+        slug="btc-updown-5m-1776257100",
+    )
+
+    assert rows[0]["exit_reason"] == "position_open"
+    assert rows[0]["accounting_status"] == "open"
+    assert rows[0]["entry_price"] == 0.77
+    assert rows[0]["entry_in_configured_band"] is True
+    assert rows[0]["exit_price"] is None
+    assert rows[0]["pnl"] is None
+    assert rows[0]["roi"] is None
+    assert rows[0]["settled"] is False
+
+
+def test_extract_strategy_results_flags_sell_side_closed_position_as_invalid_accounting() -> None:
+    instrument_id = "POLYMARKET.BTC-5M-UP"
+    preset = SimpleNamespace(
+        name="edge_pullback_70_tight",
+        mode="basic",
+        rationale="tight edge",
+        entry_price=0.70,
+        max_entry_price=0.74,
+        exit_price=0.96,
+        stop_loss_price=0.66,
+    )
+    closed_position = SimpleNamespace(
+        avg_px_open=0.96,
+        avg_px_close=0.97,
+        quantity="0",
+        peak_qty="5",
+        realized_pnl=SimpleNamespace(as_double=lambda: -0.7448),
+        realized_return=-0.010416666666666676,
+        entry=SimpleNamespace(name="SELL"),
+        ts_opened=1_776_258_526_046_101_440,
+        ts_closed=1_776_258_526_066_157_094,
+        closing_order_id="close-order-1",
+    )
+
+    cache = MagicMock()
+    cache.positions_closed.return_value = [closed_position]
+    cache.positions_open.return_value = []
+
+    rows = daemon.extract_strategy_results(
+        cache=cache,
+        presets=[preset],
+        instrument_id=instrument_id,
+        asset="BTC",
+        slug="btc-updown-5m-1776258300",
+    )
+
+    assert rows[0]["exit_reason"] == "accounting_invalid"
+    assert rows[0]["accounting_status"] == "invalid_entry_side"
+    assert rows[0]["entry_side"] == "sell"
+    assert rows[0]["entry_price"] == 0.96
+    assert rows[0]["entry_in_configured_band"] is False
+    assert rows[0]["pnl"] is None
+    assert rows[0]["roi"] is None
+    assert rows[0]["settled"] is False
+
+
+def test_extract_strategy_results_flags_closed_position_outside_entry_band_as_invalid_accounting() -> None:
+    instrument_id = "POLYMARKET.BTC-5M-UP"
+    preset = SimpleNamespace(
+        name="edge_pullback_70_tight",
+        mode="basic",
+        rationale="tight edge",
+        entry_price=0.70,
+        max_entry_price=0.74,
+        exit_price=0.96,
+        stop_loss_price=0.66,
+    )
+    closed_position = SimpleNamespace(
+        avg_px_open=0.69,
+        avg_px_close=0.65,
+        quantity="0",
+        peak_qty="127.68",
+        realized_pnl=SimpleNamespace(as_double=lambda: -17.425768),
+        realized_return=-0.05797101449275352,
+        entry=SimpleNamespace(name="BUY"),
+        ts_opened=1_776_296_653_819_034_720,
+        ts_closed=1_776_296_653_859_076_427,
+        closing_order_id="close-order-1",
+    )
+
+    cache = MagicMock()
+    cache.positions_closed.return_value = [closed_position]
+    cache.positions_open.return_value = []
+
+    rows = daemon.extract_strategy_results(
+        cache=cache,
+        presets=[preset],
+        instrument_id=instrument_id,
+        asset="BTC",
+        slug="btc-updown-5m-1776296400",
+    )
+
+    assert rows[0]["exit_reason"] == "accounting_invalid"
+    assert rows[0]["accounting_status"] == "invalid_entry_band"
+    assert rows[0]["entry_side"] == "buy"
+    assert rows[0]["entry_in_configured_band"] is False
+    assert rows[0]["pnl"] is None
+    assert rows[0]["settled"] is False
+
+
+def test_run_node_until_deadline_uses_async_run_and_stop() -> None:
+    events: list[str] = []
+
+    async def _fake_run_async():
+        events.append("run")
+        await asyncio.sleep(0)
+        events.append("run-finished")
+
+    async def _fake_stop_async():
+        events.append("stop")
+
+    node = SimpleNamespace(
+        run_async=_fake_run_async,
+        stop_async=_fake_stop_async,
+        kernel=SimpleNamespace(dispose=lambda: events.append("kernel-dispose")),
+        dispose=lambda: events.append("dispose"),
+    )
+
+    async def _exercise():
+        await daemon._run_node_until_deadline(
+            node=node,
+            duration_seconds=0.0,
+            sleeper=lambda _: asyncio.sleep(0),
+        )
+
+    asyncio.run(_exercise())
+
+    assert events == ["run", "stop", "run-finished"]
+
+
+def test_default_run_round_extracts_results_before_disposing_kernel(monkeypatch) -> None:
+    disposed = False
+    executor = Mock()
+    instrument_id = "BTC-5M-UP.POLYMARKET"
+    closed_position = SimpleNamespace(
+        avg_px_open=0.51,
+        avg_px_close=0.24,
+        quantity="10",
+        realized_pnl=SimpleNamespace(as_double=lambda: -3.21),
+        realized_return=-0.52941,
+        entry=SimpleNamespace(name="BUY"),
+        ts_opened=1_776_227_151_537_485_647,
+        ts_closed=1_776_227_391_944_676_269,
+        closing_order_id="close-order-1",
+    )
+
+    class _Cache:
+        def positions_closed(self, **kwargs):
+            assert disposed is False
+            return [closed_position]
+
+        def positions_open(self, **kwargs):
+            assert disposed is False
+            return []
+
+    class _Kernel:
+        def __init__(self):
+            self.executor = executor
+
+        def dispose(self):
+            nonlocal disposed
+            disposed = True
+
+    class _Trader:
+        def add_strategy(self, strategy):
+            return None
+
+    class _Node:
+        cache = _Cache()
+        trader = _Trader()
+
+        def __init__(self, *, config):
+            self.config = config
+            self.kernel = _Kernel()
+
+        def add_data_client_factory(self, *args):
+            return None
+
+        def add_exec_client_factory(self, *args):
+            return None
+
+        def build(self):
+            return None
+
+    async def _fake_run_node_until_deadline(**kwargs):
+        return None
+
+    monkeypatch.setattr(daemon, "TradingNode", _Node)
+    monkeypatch.setattr(daemon, "_run_node_until_deadline", _fake_run_node_until_deadline)
+    session = SimpleNamespace(
+        instrument_ids={"up": instrument_id, "down": "BTC-5M-DOWN.POLYMARKET"},
+        end_time=datetime.now(tz=UTC) + timedelta(seconds=20),
+        slug="btc-updown-5m-test",
+    )
+
+    rows = asyncio.run(
+        daemon._default_run_round(
+            session=session,
+            asset="BTC",
+            preset_set="smoke",
+            execution_cutoff_seconds=15.0,
+        ),
+    )
+
+    assert disposed is True
+    executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+    assert rows[0]["exit_reason"] == "position_closed"
+    assert rows[0]["pnl"] == -3.21
+
+
+def test_default_run_round_builds_and_extracts_both_outcome_sides(monkeypatch) -> None:
+    added_strategy_ids: list[str] = []
+    captured_config_instruments: list[str] = []
+    captured_extracts: list[tuple[str, str]] = []
+
+    class _Kernel:
+        executor = None
+
+        def dispose(self):
+            return None
+
+    class _Trader:
+        def add_strategy(self, strategy):
+            added_strategy_ids.append(strategy.id.value)
+
+    class _Node:
+        cache = MagicMock()
+        trader = _Trader()
+        kernel = _Kernel()
+
+        def __init__(self, *, config):
+            self.config = config
+
+        def add_data_client_factory(self, *args):
+            return None
+
+        def add_exec_client_factory(self, *args):
+            return None
+
+        def build(self):
+            return None
+
+    async def _fake_run_node_until_deadline(**kwargs):
+        return None
+
+    def _fake_build_daemon_node_config(**kwargs):
+        captured_config_instruments.extend(kwargs["instrument_ids"])
+        return SimpleNamespace()
+
+    def _fake_extract_strategy_results(**kwargs):
+        token_side = kwargs["token_side"]
+        instrument_id = kwargs["instrument_id"]
+        captured_extracts.append((token_side, instrument_id))
+        return [
+            {
+                "event": "strategy_result",
+                "strategy_name": f"smoke_entry_{token_side}",
+                "token_side": token_side,
+                "instrument_id": instrument_id,
+            },
+        ]
+
+    monkeypatch.setattr(daemon, "TradingNode", _Node)
+    monkeypatch.setattr(daemon, "_run_node_until_deadline", _fake_run_node_until_deadline)
+    monkeypatch.setattr(daemon, "build_daemon_node_config", _fake_build_daemon_node_config)
+    monkeypatch.setattr(daemon, "extract_strategy_results", _fake_extract_strategy_results)
+
+    session = SimpleNamespace(
+        instrument_ids={
+            "up": "BTC-5M-UP.POLYMARKET",
+            "down": "BTC-5M-DOWN.POLYMARKET",
+        },
+        end_time=datetime.now(tz=UTC) + timedelta(seconds=20),
+        slug="btc-updown-5m-test",
+    )
+
+    rows = asyncio.run(
+        daemon._default_run_round(
+            session=session,
+            asset="BTC",
+            preset_set="smoke",
+            execution_cutoff_seconds=15.0,
+        ),
+    )
+
+    assert captured_config_instruments == [
+        "BTC-5M-UP.POLYMARKET",
+        "BTC-5M-DOWN.POLYMARKET",
+    ]
+    assert [strategy_id.removesuffix("-None") for strategy_id in added_strategy_ids] == [
+        "PM5M-SMOKE_ENTRY-UP",
+        "PM5M-SMOKE_ENTRY-DOWN",
+    ]
+    assert captured_extracts == [
+        ("up", "BTC-5M-UP.POLYMARKET"),
+        ("down", "BTC-5M-DOWN.POLYMARKET"),
+    ]
+    assert [row["strategy_name"] for row in rows] == ["smoke_entry_up", "smoke_entry_down"]

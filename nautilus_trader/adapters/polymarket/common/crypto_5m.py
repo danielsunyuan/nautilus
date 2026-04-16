@@ -141,6 +141,7 @@ def candidate_crypto_5m_market_slugs(*, asset: str, now: datetime | None = None)
     current = _round_start_epoch(now)
     return [
         f"{symbol}-updown-5m-{current}",
+        f"{symbol}-updown-5m-{current + ROUND_INTERVAL_SECONDS}",
         f"{symbol}-updown-5m-{current - ROUND_INTERVAL_SECONDS}",
     ]
 

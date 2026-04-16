@@ -28,13 +28,14 @@ from decimal import Decimal
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import random
 import re
 import sys
-import threading
 import uuid
 from typing import Any
+from typing import Literal
 
 try:
     from examples.live.polymarket._crypto_5m_support import DEFAULT_GAMMA_BASE_URL
@@ -59,6 +60,9 @@ try:
     from examples.live.polymarket.crypto_5m_strategy_library import all_strategy_presets
     from examples.live.polymarket.crypto_5m_strategy_library import entry_grid_strategy_presets
     from examples.live.polymarket.crypto_5m_strategy_library import first_wave_strategy_presets
+    from examples.live.polymarket.crypto_5m_strategy_library import live_edge_strategy_presets
+    from examples.live.polymarket.crypto_5m_strategy_library import research_strategy_presets
+    from examples.live.polymarket.crypto_5m_strategy_library import smoke_test_strategy_presets
 except ModuleNotFoundError:
     module_name = "examples.live.polymarket.crypto_5m_strategy_library"
     module_path = Path(__file__).resolve().with_name("crypto_5m_strategy_library.py")
@@ -71,6 +75,9 @@ except ModuleNotFoundError:
     all_strategy_presets = module.all_strategy_presets
     entry_grid_strategy_presets = module.entry_grid_strategy_presets
     first_wave_strategy_presets = module.first_wave_strategy_presets
+    live_edge_strategy_presets = module.live_edge_strategy_presets
+    research_strategy_presets = module.research_strategy_presets
+    smoke_test_strategy_presets = module.smoke_test_strategy_presets
 
 try:
     from examples.live.polymarket.crypto_5m_live_strategy import PolymarketCrypto5mPaperStrategy
@@ -103,11 +110,15 @@ from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.core.datetime import unix_nanos_to_dt
 from nautilus_trader.core.nautilus_pyo3 import HttpClient
 from nautilus_trader.live.node import TradingNode
+from nautilus_trader.model.currencies import USDC_POS
+from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import StrategyId
 from nautilus_trader.model.identifiers import TraderId
 DEFAULT_OUTPUT_DIR = "/workspace/outputs"
 DEFAULT_RECONNECT_DELAY = 2.0
 DEFAULT_EXECUTION_CUTOFF_SECONDS = 15.0
+DEFAULT_CACHE_HOST = "redis"
+DEFAULT_CACHE_PORT = 6379
 _SAFE_PRESET_SET = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -160,6 +171,14 @@ def build_output_path(*, output_dir: str | Path, preset_set: str, now: datetime)
     return root.resolve(strict=False) / "polymarket" / "runs" / f"overnight_{preset_set}_{stamp}.jsonl"
 
 
+def _env_first(*names: str) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
+
+
 def _backoff_delay(reconnect_delay: float) -> float:
     base = max(0.0, float(reconnect_delay))
     return base + float(random.uniform(0.0, max(0.5, base * 0.5)))
@@ -171,6 +190,12 @@ def _strategy_presets_for_set(preset_set: str):
         return first_wave_strategy_presets()
     if normalized == "grid":
         return entry_grid_strategy_presets()
+    if normalized == "smoke":
+        return smoke_test_strategy_presets()
+    if normalized == "edge":
+        return live_edge_strategy_presets()
+    if normalized == "research":
+        return research_strategy_presets()
     if normalized in {"all", "advanced"}:
         return all_strategy_presets()
     if normalized == "momentum":
@@ -222,12 +247,22 @@ def build_daemon_node_config(
         data_clients={
             POLYMARKET: PolymarketDataClientConfig(
                 instrument_config=instrument_provider_config,
+                private_key=_env_first("POLYMARKET_PRIVATE_KEY", "POLYMARKET_PK"),
+                signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
+                funder=_env_first("POLYMARKET_FUNDER_ADDRESS", "POLYMARKET_FUNDER"),
+                api_key=_env_first("POLYMARKET_CLOB_API_KEY", "POLYMARKET_API_KEY"),
+                api_secret=_env_first("POLYMARKET_CLOB_API_SECRET", "POLYMARKET_API_SECRET"),
+                passphrase=_env_first("POLYMARKET_CLOB_PASSPHRASE", "POLYMARKET_PASSPHRASE"),
+                base_url_http=_env_first("POLYMARKET_CLOB_HOST"),
             ),
         },
         exec_clients={
             POLYMARKET: SandboxExecutionClientConfig(
-                venue=POLYMARKET_VENUE,
-                starting_balances=["1_000 USDC"],
+                venue=str(POLYMARKET_VENUE),
+                base_currency=str(USDC_POS),
+                account_type="CASH",
+                starting_balances=[f"1_000 {USDC_POS}"],
+                fee_model_path="nautilus_trader.adapters.polymarket.fee_model.PolymarketFeeModel",
             ),
         },
         timeout_connection=20.0,
@@ -243,23 +278,39 @@ def _build_paper_strategy(
     instrument_id: Any,
     market_end_time: datetime,
     order_qty: Decimal = Decimal(10),
-    token_side: str = "up",
+    token_side: Literal["up", "down"] = "up",
 ) -> PolymarketCrypto5mPaperStrategy:
+    normalized_side = _normalize_token_side(token_side)
     return PolymarketCrypto5mPaperStrategy(
         config=PolymarketCrypto5mPaperStrategyConfig(
-            strategy_id=f"PM5M-{preset.name.upper()}",
+            strategy_id=str(_strategy_id_for_preset(preset, normalized_side)),
             instrument_id=instrument_id,
             preset=preset,
             market_end_time=market_end_time,
             order_qty=Decimal(str(order_qty)),
-            token_side=str(token_side),
+            token_side=normalized_side,
             close_positions_on_stop=True,
         ),
     )
 
 
-def _strategy_id_for_preset(preset: Any) -> StrategyId:
-    return StrategyId(f"PM5M-{preset.name.upper()}")
+def _normalize_token_side(token_side: str) -> Literal["up", "down"]:
+    normalized = str(token_side).strip().lower()
+    if normalized not in {"up", "down"}:
+        raise ValueError(f"token_side must be 'up' or 'down', got {token_side!r}")
+    return normalized  # type: ignore[return-value]
+
+
+def _strategy_name_for_preset(preset: Any, token_side: str) -> str:
+    return f"{preset.name}_{_normalize_token_side(token_side)}"
+
+
+def _strategy_key_for_preset(preset: Any, token_side: str) -> str:
+    return _strategy_name_for_preset(preset, token_side)
+
+
+def _strategy_id_for_preset(preset: Any, token_side: str = "up") -> StrategyId:
+    return StrategyId(f"PM5M-{preset.name.upper()}-{_normalize_token_side(token_side).upper()}")
 
 
 def _as_decimal(value: Any) -> Decimal:
@@ -274,44 +325,95 @@ def _iso8601_from_unix_nanos(timestamp_ns: int | None) -> str | None:
     return unix_nanos_to_dt(int(timestamp_ns)).isoformat()
 
 
+def _configured_max_entry_price(preset: Any) -> float:
+    max_entry_price = float(getattr(preset, "max_entry_price", 0.0) or 0.0)
+    return max_entry_price if max_entry_price > 0 else float(preset.exit_price)
+
+
+def _configured_entry_fields(preset: Any) -> dict[str, float]:
+    return {
+        "configured_entry_price": float(preset.entry_price),
+        "configured_max_entry_price": _configured_max_entry_price(preset),
+    }
+
+
+def _position_entry_side(position: Any) -> str:
+    return str(getattr(getattr(position, "entry", None), "name", "BUY")).lower()
+
+
+def _entry_in_configured_band(*, preset: Any, entry_price: float, entry_side: str) -> bool:
+    if entry_side != "buy":
+        return False
+    return float(preset.entry_price) <= entry_price <= _configured_max_entry_price(preset)
+
+
 def _position_row(
     *,
     position: Any,
     preset: Any,
     instrument_id: str,
+    token_side: str,
     asset: str,
     slug: str,
     exit_reason: str,
     settled: bool,
 ) -> dict[str, Any]:
-    shares = float(_as_decimal(position.quantity))
+    shares_quantity = getattr(position, "peak_qty", None) or position.quantity
+    shares = float(_as_decimal(shares_quantity))
     entry_price = float(position.avg_px_open)
     stake = float(Decimal(str(entry_price)) * Decimal(str(shares)))
+    entry_side = _position_entry_side(position)
+    entry_in_band = _entry_in_configured_band(
+        preset=preset,
+        entry_price=entry_price,
+        entry_side=entry_side,
+    )
+    accounting_status = "settled" if settled else "open"
+    row_exit_reason = exit_reason
+    row_settled = settled
+    if entry_side != "buy":
+        accounting_status = "invalid_entry_side"
+        row_exit_reason = "accounting_invalid"
+        row_settled = False
+    elif row_settled and not entry_in_band:
+        accounting_status = "invalid_entry_band"
+        row_exit_reason = "accounting_invalid"
+        row_settled = False
+
     realized_pnl = None
-    if getattr(position, "realized_pnl", None) is not None:
+    if row_settled and getattr(position, "realized_pnl", None) is not None:
         realized_pnl = float(position.realized_pnl.as_double())
+    realized_return = float(getattr(position, "realized_return", 0.0)) if row_settled else None
+    exit_price = None
+    if row_settled:
+        exit_price = float(position.avg_px_close) if getattr(position, "avg_px_close", 0.0) else preset.exit_price
 
     return {
         "event": "strategy_result",
-        "strategy_name": preset.name,
+        "strategy_name": _strategy_name_for_preset(preset, token_side),
+        "preset_name": preset.name,
+        "token_side": _normalize_token_side(token_side),
         "strategy_mode": preset.mode,
         "rationale": preset.rationale,
         "runner": "polymarket_crypto_5m_paper_strategy",
         "entry_price": entry_price,
-        "exit_price": float(position.avg_px_close) if getattr(position, "avg_px_close", 0.0) else preset.exit_price,
+        **_configured_entry_fields(preset),
+        "entry_in_configured_band": entry_in_band,
+        "accounting_status": accounting_status,
+        "exit_price": exit_price,
         "stop_loss_price": preset.stop_loss_price,
         "instrument_id": str(instrument_id),
         "asset": asset,
         "slug": slug,
-        "exit_reason": exit_reason,
-        "settled": settled,
+        "exit_reason": row_exit_reason,
+        "settled": row_settled,
         "pnl": realized_pnl,
-        "roi": float(getattr(position, "realized_return", 0.0)),
+        "roi": realized_return,
         "shares": shares,
         "stake": stake,
         "entry_time": _iso8601_from_unix_nanos(getattr(position, "ts_opened", 0)),
         "exit_time": _iso8601_from_unix_nanos(getattr(position, "ts_closed", 0)),
-        "entry_side": getattr(getattr(position, "entry", None), "name", "BUY").lower(),
+        "entry_side": entry_side,
     }
 
 
@@ -320,15 +422,24 @@ def extract_strategy_results(
     cache: Any,
     presets: tuple[Any, ...] | list[Any],
     instrument_id: str,
+    token_side: str = "up",
     asset: str,
     slug: str,
+    strategy_ids_by_preset: dict[str, StrategyId] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    normalized_side = _normalize_token_side(token_side)
+    cache_instrument_id = InstrumentId.from_str(str(instrument_id))
     for preset in presets:
-        strategy_id = _strategy_id_for_preset(preset)
+        strategy_key = _strategy_key_for_preset(preset, normalized_side)
+        strategy_id = (
+            strategy_ids_by_preset.get(strategy_key) or strategy_ids_by_preset.get(preset.name)
+            if strategy_ids_by_preset is not None
+            else None
+        ) or _strategy_id_for_preset(preset, normalized_side)
         closed_positions = list(
             cache.positions_closed(
-                instrument_id=instrument_id,
+                instrument_id=cache_instrument_id,
                 strategy_id=strategy_id,
             ),
         )
@@ -338,6 +449,7 @@ def extract_strategy_results(
                     position=closed_positions[-1],
                     preset=preset,
                     instrument_id=instrument_id,
+                    token_side=normalized_side,
                     asset=asset,
                     slug=slug,
                     exit_reason="position_closed",
@@ -348,7 +460,7 @@ def extract_strategy_results(
 
         open_positions = list(
             cache.positions_open(
-                instrument_id=instrument_id,
+                instrument_id=cache_instrument_id,
                 strategy_id=strategy_id,
             ),
         )
@@ -358,6 +470,7 @@ def extract_strategy_results(
                     position=open_positions[-1],
                     preset=preset,
                     instrument_id=instrument_id,
+                    token_side=normalized_side,
                     asset=asset,
                     slug=slug,
                     exit_reason="position_open",
@@ -369,11 +482,16 @@ def extract_strategy_results(
         rows.append(
             {
                 "event": "strategy_result",
-                "strategy_name": preset.name,
+                "strategy_name": _strategy_name_for_preset(preset, normalized_side),
+                "preset_name": preset.name,
+                "token_side": normalized_side,
                 "strategy_mode": preset.mode,
                 "rationale": preset.rationale,
                 "runner": "polymarket_crypto_5m_paper_strategy",
                 "entry_price": preset.entry_price,
+                **_configured_entry_fields(preset),
+                "entry_in_configured_band": None,
+                "accounting_status": "no_position",
                 "exit_price": preset.exit_price,
                 "stop_loss_price": preset.stop_loss_price,
                 "instrument_id": str(instrument_id),
@@ -387,21 +505,30 @@ def extract_strategy_results(
                 "stake": None,
                 "entry_time": None,
                 "exit_time": None,
-                "entry_side": "up",
+                "entry_side": None,
             },
         )
     return rows
 
 
-def _run_node_for_duration(*, node: TradingNode, duration_seconds: float) -> None:
-    timer = threading.Timer(max(0.1, duration_seconds), node.stop)
-    timer.daemon = True
-    timer.start()
+async def _run_node_until_deadline(
+    *,
+    node: TradingNode,
+    duration_seconds: float,
+    sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    run_task = asyncio.create_task(node.run_async())
     try:
-        node.run()
+        await sleeper(max(0.0, float(duration_seconds)))
+        await node.stop_async()
+        await run_task
     finally:
-        timer.cancel()
-        node.dispose()
+        if not run_task.done():
+            run_task.cancel()
+            try:
+                await run_task
+            except asyncio.CancelledError:
+                pass
 
 
 async def _default_run_round(
@@ -412,22 +539,28 @@ async def _default_run_round(
     execution_cutoff_seconds: float,
 ) -> list[dict[str, Any]]:
     presets = _strategy_presets_for_set(preset_set)
-    instrument_id = session.instrument_ids["up"]
+    instrument_ids_by_side = {
+        "up": session.instrument_ids["up"],
+        "down": session.instrument_ids["down"],
+    }
     config = build_daemon_node_config(
-        instrument_ids=[str(instrument_id)],
+        instrument_ids=[str(instrument_id) for instrument_id in instrument_ids_by_side.values()],
         trader_id="PAPER-5M-DAEMON",
-        cache_host="redis",
-        cache_port=6379,
+        cache_host=os.getenv("NAUTILUS_CACHE_HOST", DEFAULT_CACHE_HOST),
+        cache_port=int(os.getenv("NAUTILUS_CACHE_PORT", str(DEFAULT_CACHE_PORT))),
     )
     node = TradingNode(config=config)
-    for preset in presets:
-        node.trader.add_strategy(
-            _build_paper_strategy(
+    strategy_ids_by_preset: dict[str, StrategyId] = {}
+    for token_side, instrument_id in instrument_ids_by_side.items():
+        for preset in presets:
+            strategy = _build_paper_strategy(
                 preset=preset,
                 instrument_id=instrument_id,
                 market_end_time=session.end_time,
-            ),
-        )
+                token_side=_normalize_token_side(token_side),
+            )
+            node.trader.add_strategy(strategy)
+            strategy_ids_by_preset[_strategy_key_for_preset(preset, token_side)] = strategy.id
     node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
     node.add_exec_client_factory(POLYMARKET, SandboxLiveExecClientFactory)
     node.build()
@@ -438,17 +571,27 @@ async def _default_run_round(
         (session.end_time - now).total_seconds() - max(0.0, float(execution_cutoff_seconds)),
     )
     try:
-        await asyncio.to_thread(_run_node_for_duration, node=node, duration_seconds=runtime_seconds)
+        await _run_node_until_deadline(node=node, duration_seconds=runtime_seconds)
+        rows: list[dict[str, Any]] = []
+        for token_side, instrument_id in instrument_ids_by_side.items():
+            rows.extend(
+                extract_strategy_results(
+                    cache=node.cache,
+                    presets=presets,
+                    instrument_id=str(instrument_id),
+                    token_side=token_side,
+                    asset=asset,
+                    slug=session.slug,
+                    strategy_ids_by_preset=strategy_ids_by_preset,
+                ),
+            )
+        return rows
     except Exception as exc:  # pragma: no cover - exercised via orchestration wrapper
         raise RecoverableDaemonError(str(exc)) from exc
-
-    return extract_strategy_results(
-        cache=node.cache,
-        presets=presets,
-        instrument_id=str(instrument_id),
-        asset=asset,
-        slug=session.slug,
-    )
+    finally:
+        node.kernel.dispose()
+        if node.kernel.executor:
+            node.kernel.executor.shutdown(wait=True, cancel_futures=True)
 
 
 async def _sleep_until_next_round(*, session: Any) -> None:
