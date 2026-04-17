@@ -23,10 +23,6 @@ services:
       POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
       POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
       POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
-      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
-      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
-      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
-      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
     volumes:
       - ..:/workspace
     networks:
@@ -268,6 +264,35 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  sports-results-reporter:
+    container_name: nautilus-sports-results-reporter
+    image: nautilus-papertrade:latest
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - sh
+      - -lc
+      - |
+        while true; do
+          python /workspace/examples/live/polymarket/polymarket_sports_reporting.py \
+            --report-root /workspace/outputs \
+            --report-md /workspace/SPORTS_RESULTS.md || true
+          sleep "$${REPORT_REFRESH_INTERVAL_SECONDS:-60}"
+        done
+    init: true
+    tty: true
+    stdin_open: true
+    environment:
+      REPORT_REFRESH_INTERVAL_SECONDS: ${REPORT_REFRESH_INTERVAL_SECONDS:-60}
+    volumes:
+      - ..:/workspace
+      - ../outputs:/workspace/outputs
+    networks:
+      - nautilus-network
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
   weather-daemon-vpn:
     container_name: nautilus-weather-daemon-vpn
     profiles: ["vpn"]
@@ -282,7 +307,7 @@ services:
       - --preset-set
       - all
       - --max-rounds
-      - "1"
+      - "0"
       - --output-dir
       - /workspace/outputs
     init: true
@@ -291,6 +316,13 @@ services:
     env_file:
       - ../.env
       - ../.env.polymarket
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_VPN_CACHE_HOST:-172.22.0.3}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
+      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
+      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
     volumes:
       - ..:/workspace
       - ../outputs:/workspace/outputs
@@ -302,7 +334,81 @@ services:
         condition: service_started
       redis:
         condition: service_started
-    restart: "no"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  sports-daemon-vpn:
+    container_name: nautilus-sports-daemon-vpn
+    profiles: ["vpn"]
+    image: nautilus-papertrade:latest
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/polymarket/polymarket_sports_paper_daemon.py
+      - --preset-set
+      - all
+      - --max-rounds
+      - "0"
+      - --output-dir
+      - /workspace/outputs
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+      - ../.env.polymarket
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_VPN_CACHE_HOST:-172.22.0.3}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
+      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
+      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
+    volumes:
+      - ..:/workspace
+      - ../outputs:/workspace/outputs
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  sports-settlement-vpn:
+    container_name: nautilus-sports-settlement-vpn
+    profiles: ["vpn"]
+    image: nautilus-papertrade:latest
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/polymarket/sports_settlement.py
+      - --output-dir
+      - /workspace/outputs
+      - --poll-interval
+      - "900"
+      - --gamma-host
+      - https://gamma-api.polymarket.com
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+    volumes:
+      - ..:/workspace
+      - ../outputs:/workspace/outputs
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    restart: unless-stopped
     security_opt:
       - no-new-privileges:true
 
@@ -340,6 +446,71 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+
+  sentinel-bridge:
+    image: nautilus-papertrade:latest
+    profiles: ["sentinel"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - nautilus-network
+    environment:
+      SENTINEL_CORE_URL: "${SENTINEL_CORE_URL:-http://172.18.0.1:8080}"
+      SENTINEL_API_KEY: "${SENTINEL_API_KEY:-supersecret}"
+      POLYMARKET_GAMMA_URL: "${POLYMARKET_GAMMA_URL:-https://gamma-api.polymarket.com}"
+      SENTINEL_POLL_INTERVAL: "${SENTINEL_POLL_INTERVAL:-60}"
+      SENTINEL_MIN_RELEVANCE: "${SENTINEL_MIN_RELEVANCE:-0.25}"
+      SENTINEL_SIGNAL_PATH: "/data/live_signals/sentinel_news_signals.jsonl"
+    volumes:
+      - ${NAUTILUS_SENTINEL_SIGNALS_PATH:-/tmp/sentinel_signals}:/data/live_signals
+    command:
+      - python
+      - -m
+      - examples.live.polymarket.sentinel_signal_bridge
+      - --max-iterations
+      - "0"
+
+  sentinel-news-daemon-vpn:
+    image: nautilus-papertrade:latest
+    profiles: ["vpn", "sentinel"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    env_file:
+      - path: .env.polymarket
+        required: false
+    environment:
+      SENTINEL_CORE_URL: "${SENTINEL_CORE_URL:-http://172.18.0.1:8080}"
+      SENTINEL_API_KEY: "${SENTINEL_API_KEY:-supersecret}"
+      NAUTILUS_CACHE_HOST: "${NAUTILUS_VPN_CACHE_HOST:-redis}"
+      NAUTILUS_CACHE_PORT: "${NAUTILUS_CACHE_PORT:-6379}"
+      SENTINEL_SIGNAL_PATH: "/data/live_signals/sentinel_news_signals.jsonl"
+    volumes:
+      - ${NAUTILUS_SENTINEL_SIGNALS_PATH:-/tmp/sentinel_signals}:/data/live_signals
+      - ${NAUTILUS_SENTINEL_OUTPUT_PATH:-/tmp/sentinel_outputs}:/workspace/outputs
+    working_dir: /workspace/nautilus
+    command:
+      - python
+      - examples/live/polymarket/polymarket_sentinel_news_daemon.py
+      - --poll-interval
+      - "${SENTINEL_POLL_INTERVAL:-300}"
+      - --min-relevance
+      - "${SENTINEL_MIN_RELEVANCE:-0.25}"
 
   postgres:
     container_name: nautilus-database
