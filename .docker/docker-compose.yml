@@ -234,6 +234,58 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  ninety-microprice-research-vpn:
+    container_name: nautilus-ninety-microprice-research-vpn
+    profiles: ["vpn"]
+    image: nautilus-papertrade:latest
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/polymarket/polymarket_crypto_5m_paper_daemon.py
+      - --asset
+      - BTC
+      - --preset-set
+      - ninety_only
+      - --utc-hour-min
+      - "${NINETY_RESEARCH_UTC_HOUR_MIN:-21}"
+      - --utc-hour-max
+      - "${NINETY_RESEARCH_UTC_HOUR_MAX:-24}"
+      - --max-rounds
+      - "${NINETY_RESEARCH_MAX_ROUNDS:-0}"
+      - --execution-cutoff-seconds
+      - "${NINETY_RESEARCH_EXECUTION_CUTOFF_SECONDS:-15}"
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+      - ../.env.polymarket
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_VPN_CACHE_HOST:-172.22.0.3}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
+      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
+      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
+    volumes:
+      - ..:/workspace
+      - ../outputs:/workspace/outputs
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
   crypto-results-reporter:
     container_name: nautilus-crypto-results-reporter
     image: nautilus-papertrade:latest
@@ -462,10 +514,10 @@ services:
       - nautilus-network
     environment:
       SENTINEL_CORE_URL: "${SENTINEL_CORE_URL:-http://172.18.0.1:8080}"
-      SENTINEL_API_KEY: "${SENTINEL_API_KEY:-supersecret}"
+      SENTINEL_API_KEY: "${SENTINEL_API_KEY:-user}"
       POLYMARKET_GAMMA_URL: "${POLYMARKET_GAMMA_URL:-https://gamma-api.polymarket.com}"
       SENTINEL_POLL_INTERVAL: "${SENTINEL_POLL_INTERVAL:-60}"
-      SENTINEL_MIN_RELEVANCE: "${SENTINEL_MIN_RELEVANCE:-0.25}"
+      SENTINEL_MIN_RELEVANCE: "${SENTINEL_MIN_RELEVANCE:-0.05}"
       SENTINEL_SIGNAL_PATH: "/data/live_signals/sentinel_news_signals.jsonl"
     volumes:
       - ${NAUTILUS_SENTINEL_SIGNALS_PATH:-/tmp/sentinel_signals}:/data/live_signals
@@ -496,7 +548,7 @@ services:
         required: false
     environment:
       SENTINEL_CORE_URL: "${SENTINEL_CORE_URL:-http://172.18.0.1:8080}"
-      SENTINEL_API_KEY: "${SENTINEL_API_KEY:-supersecret}"
+      SENTINEL_API_KEY: "${SENTINEL_API_KEY:-user}"
       NAUTILUS_CACHE_HOST: "${NAUTILUS_VPN_CACHE_HOST:-redis}"
       NAUTILUS_CACHE_PORT: "${NAUTILUS_CACHE_PORT:-6379}"
       SENTINEL_SIGNAL_PATH: "/data/live_signals/sentinel_news_signals.jsonl"

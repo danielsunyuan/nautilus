@@ -46,4 +46,9 @@ else
   nordvpn connect >/dev/null
 fi
 
+# Allow Docker internal networks through the kill switch so containers can
+# reach Redis and Postgres without routing through the VPN tunnel.
+# Must be set AFTER connecting — NordVPN clears allowlist rules on connect.
+nordvpn allowlist add subnet 172.16.0.0/12 >/dev/null 2>&1 || true
+
 exec "$@"
