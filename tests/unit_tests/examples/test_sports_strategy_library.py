@@ -32,7 +32,7 @@ def test_allowed_sports_blocks_wrong_sport():
 def test_allowed_sports_passes_correct_sport():
     preset = _make_preset(allowed_sports=frozenset({"tennis"}))
     assert should_enter_sports_market(
-        preset=preset, bid=0.61, ask=0.63, bid_size=100, ask_size=100, sport="tennis", market_type="moneyline"
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100, sport="tennis", market_type="moneyline"
     )
 
 
@@ -46,14 +46,14 @@ def test_allowed_market_types_blocks_wrong_type():
 def test_allowed_market_types_passes_correct_type():
     preset = _make_preset(allowed_market_types=frozenset({"totals"}))
     assert should_enter_sports_market(
-        preset=preset, bid=0.61, ask=0.63, bid_size=100, ask_size=100, sport="nba", market_type="totals"
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100, sport="nba", market_type="totals"
     )
 
 
 def test_no_whitelist_passes_everything():
     preset = _make_preset()
     assert should_enter_sports_market(
-        preset=preset, bid=0.61, ask=0.63, bid_size=100, ask_size=100, sport="mlb", market_type="spreads"
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100, sport="mlb", market_type="spreads"
     )
 
 
@@ -64,13 +64,13 @@ def test_both_whitelists_combined():
     )
     # nba+totals passes
     assert should_enter_sports_market(
-        preset=preset, bid=0.61, ask=0.63, bid_size=100, ask_size=100, sport="nba", market_type="totals"
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100, sport="nba", market_type="totals"
     )
     # nba+spreads blocked
     assert not should_enter_sports_market(
-        preset=preset, bid=0.61, ask=0.63, bid_size=100, ask_size=100, sport="nba", market_type="spreads"
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100, sport="nba", market_type="spreads"
     )
     # tennis+totals blocked
     assert not should_enter_sports_market(
-        preset=preset, bid=0.61, ask=0.63, bid_size=100, ask_size=100, sport="tennis", market_type="totals"
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100, sport="tennis", market_type="totals"
     )

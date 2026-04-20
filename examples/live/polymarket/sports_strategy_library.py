@@ -152,8 +152,7 @@ def should_enter_sports_market(
     if preset.mode == "band_only":
         return True
 
-    # Use small epsilon for floating point comparison
-    if (ask - bid) > (preset.max_spread + 1e-9):
+    if (ask - bid) > preset.max_spread:
         return False
     if ask_size < preset.min_ask_size:
         return False
