@@ -765,6 +765,34 @@ services:
   # Use: docker exec nautilus-nordvpn wget -qO- http://127.0.0.1:8080/positions
   # ---------------------------------------------------------------------------
 
+  weather-take-profit-vpn:
+    container_name: nautilus-weather-take-profit-vpn
+    profiles: ["vpn"]
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile.recorder
+    image: nautilus-recorder:latest
+    restart: unless-stopped
+    working_dir: /workspace/nautilus
+    env_file:
+      - path: ../.env.polymarket
+        required: false
+    environment:
+      PYTHONPATH: "/app"
+    volumes:
+      - ..:/workspace/nautilus
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - python
+      - /workspace/nautilus/examples/live/polymarket/weather_daily_temperature_take_profit.py
+      - --output-dir
+      - /workspace/nautilus/outputs
+
   weather-exit-server-vpn:
     container_name: nautilus-weather-exit-server
     profiles: ["vpn", "execution"]

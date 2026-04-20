@@ -339,3 +339,192 @@ def test_pnl_calculation_no_token(tmp_path: Path):
     assert abs(result["pnl"] - 7.0) < 1e-9
     assert result["resolved_outcome"] == "win"
     assert result["settlement_price"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Redemption tests
+# ---------------------------------------------------------------------------
+
+_collect_redeemed_condition_ids = mod._collect_redeemed_condition_ids
+_redeem_pending_wins = mod._redeem_pending_wins
+
+
+def test_collect_redeemed_condition_ids_empty():
+    """Only redemption_completed events count; pending and other events do not."""
+    all_rows = [
+        ("run.jsonl", {"event": "settlement_update", "condition_id": "0xa"}),
+        ("run.jsonl", {"event": "redemption_pending", "condition_id": "0xa"}),
+    ]
+    assert _collect_redeemed_condition_ids(all_rows) == set()
+
+
+def test_collect_redeemed_condition_ids_finds_completed():
+    all_rows = [
+        ("run.jsonl", {"event": "redemption_completed", "condition_id": "0xabc"}),
+        ("run.jsonl", {"event": "redemption_pending", "condition_id": "0xdef"}),
+        ("run.jsonl", {"event": "redemption_completed", "condition_id": "0x123"}),
+    ]
+    assert _collect_redeemed_condition_ids(all_rows) == {"0xabc", "0x123"}
+
+
+@pytest.mark.asyncio
+async def test_redeem_pending_wins_calls_fn_for_wins_only(tmp_path: Path):
+    """Calls redeem_fn for WIN condition_ids; skips LOSS settlements."""
+    _write_jsonl(tmp_path / "settlement.jsonl", [
+        {
+            "event": "settlement_update",
+            "condition_id": "0xwin1",
+            "market_slug": "slug-win1",
+            "token_id": "tid-win1",
+            "token_side": "yes",
+            "shares": 10.0,
+            "resolved_outcome": "win",
+            "resolved": True,
+        },
+        {
+            "event": "settlement_update",
+            "condition_id": "0xloss1",
+            "market_slug": "slug-loss1",
+            "token_id": "tid-loss1",
+            "token_side": "yes",
+            "shares": 10.0,
+            "resolved_outcome": "loss",
+            "resolved": True,
+        },
+    ])
+
+    writer = JsonlRunWriter(tmp_path / "redemption.jsonl")
+    redeemed: list[str] = []
+
+    async def fake_redeem(*, condition_id: str, token_side: str) -> tuple[bool, str]:
+        redeemed.append(condition_id)
+        return True, "0xfaketxhash"
+
+    await _redeem_pending_wins(
+        jsonl_dir=tmp_path,
+        writer=writer,
+        redeem_fn=fake_redeem,
+        now_fn=lambda: datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC),
+    )
+
+    assert redeemed == ["0xwin1"]
+    events = [json.loads(l) for l in (tmp_path / "redemption.jsonl").read_text().strip().split("\n")]
+    assert len(events) == 1
+    assert events[0]["event"] == "redemption_completed"
+    assert events[0]["condition_id"] == "0xwin1"
+    assert events[0]["tx_hash"] == "0xfaketxhash"
+
+
+@pytest.mark.asyncio
+async def test_redeem_pending_wins_skips_already_completed(tmp_path: Path):
+    """condition_ids with a redemption_completed event are never re-attempted."""
+    _write_jsonl(tmp_path / "settlement.jsonl", [
+        {
+            "event": "settlement_update",
+            "condition_id": "0xwin1",
+            "resolved_outcome": "win",
+            "token_id": "tid-win1",
+            "token_side": "yes",
+            "shares": 10.0,
+            "resolved": True,
+        },
+        {
+            "event": "redemption_completed",
+            "condition_id": "0xwin1",
+            "tx_hash": "0xprev",
+        },
+    ])
+
+    writer = JsonlRunWriter(tmp_path / "redemption.jsonl")
+    redeemed: list[str] = []
+
+    async def fake_redeem(*, condition_id: str, token_side: str) -> tuple[bool, str]:
+        redeemed.append(condition_id)
+        return True, "0xnewtx"
+
+    await _redeem_pending_wins(
+        jsonl_dir=tmp_path,
+        writer=writer,
+        redeem_fn=fake_redeem,
+        now_fn=lambda: datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC),
+    )
+
+    assert redeemed == []
+    assert not (tmp_path / "redemption.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_redeem_pending_wins_writes_pending_on_failure(tmp_path: Path):
+    """On redemption failure (e.g. no MATIC), writes redemption_pending event."""
+    _write_jsonl(tmp_path / "settlement.jsonl", [
+        {
+            "event": "settlement_update",
+            "condition_id": "0xwin1",
+            "market_slug": "slug-win1",
+            "token_id": "tid-win1",
+            "token_side": "yes",
+            "shares": 5.0,
+            "resolved_outcome": "win",
+            "resolved": True,
+        },
+    ])
+
+    writer = JsonlRunWriter(tmp_path / "redemption.jsonl")
+
+    async def fake_redeem(*, condition_id: str, token_side: str) -> tuple[bool, str]:
+        return False, "insufficient funds for gas * price + value"
+
+    await _redeem_pending_wins(
+        jsonl_dir=tmp_path,
+        writer=writer,
+        redeem_fn=fake_redeem,
+        now_fn=lambda: datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC),
+    )
+
+    events = [json.loads(l) for l in (tmp_path / "redemption.jsonl").read_text().strip().split("\n")]
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["event"] == "redemption_pending"
+    assert ev["condition_id"] == "0xwin1"
+    assert "insufficient funds" in ev["error"]
+
+
+@pytest.mark.asyncio
+async def test_redeem_pending_wins_deduplicates_condition_id(tmp_path: Path):
+    """Multiple WIN entries for the same condition_id trigger only one redemption."""
+    _write_jsonl(tmp_path / "settlement.jsonl", [
+        {
+            "event": "settlement_update",
+            "condition_id": "0xwin1",
+            "resolved_outcome": "win",
+            "token_id": "tid-a",
+            "token_side": "yes",
+            "shares": 5.0,
+            "resolved": True,
+        },
+        {
+            "event": "settlement_update",
+            "condition_id": "0xwin1",
+            "resolved_outcome": "win",
+            "token_id": "tid-b",
+            "token_side": "yes",
+            "shares": 8.0,
+            "resolved": True,
+        },
+    ])
+
+    writer = JsonlRunWriter(tmp_path / "redemption.jsonl")
+    call_count = [0]
+
+    async def fake_redeem(*, condition_id: str, token_side: str) -> tuple[bool, str]:
+        call_count[0] += 1
+        return True, "0xtx"
+
+    await _redeem_pending_wins(
+        jsonl_dir=tmp_path,
+        writer=writer,
+        redeem_fn=fake_redeem,
+        now_fn=lambda: datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC),
+    )
+
+    assert call_count[0] == 1

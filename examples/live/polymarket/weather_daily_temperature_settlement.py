@@ -66,6 +66,15 @@ log = logging.getLogger(__name__)
 DEFAULT_OUTPUT_DIR = "/workspace/outputs"
 RESOLVED_THRESHOLD = 0.99
 
+# ---------------------------------------------------------------------------
+# Redemption constants (CTF / Proxy Factory — Polygon mainnet)
+# ---------------------------------------------------------------------------
+
+_PROXY_FACTORY = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
+_CTF_CONTRACT = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+_USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+_POLYGON_CHAIN_ID = 137
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -136,6 +145,17 @@ def _read_all_jsonl_rows(jsonl_dir: Path) -> list[tuple[str, dict]]:
         except OSError:
             continue
     return results
+
+
+def _collect_redeemed_condition_ids(all_rows: list[tuple[str, dict]]) -> set[str]:
+    """Collect condition_ids that already have a redemption_completed event."""
+    redeemed: set[str] = set()
+    for _fname, row in all_rows:
+        if row.get("event") == "redemption_completed":
+            cid = row.get("condition_id")
+            if cid:
+                redeemed.add(cid)
+    return redeemed
 
 
 def _collect_settled_token_ids(all_rows: list[tuple[str, dict]]) -> set[str]:
@@ -334,6 +354,110 @@ async def fetch_token_resolution(
 
 
 # ---------------------------------------------------------------------------
+# On-chain redemption (CTF redeemPositions via Polymarket proxy factory)
+# ---------------------------------------------------------------------------
+
+async def redeem_winning_position(
+    *,
+    condition_id: str,
+    token_side: str,
+    rpc_url: str,
+    private_key: str,
+    http_client: Any,
+) -> tuple[bool, str]:
+    """Submit a CTF redeemPositions call via the Polymarket proxy factory.
+
+    The caller's EOA address is used to derive the proxy wallet via CREATE2.
+    The PROXY_FACTORY routes the redeemPositions call through that proxy wallet,
+    which holds the CTF tokens.
+
+    Calldata format (confirmed working via eth_call simulation):
+        proxy_factory.proxy([(typeCode=1, to=CTF, value=0, data=redeemPositions(...))])
+
+    Returns:
+        (True,  tx_hash)       on successful submission
+        (False, error_message) on failure (e.g. insufficient MATIC for gas)
+    """
+    try:
+        from eth_abi import encode as _abi_encode
+        from eth_account import Account
+        from eth_utils import keccak
+    except ImportError as exc:
+        return False, f"missing_dependency:{exc}"
+
+    # YES token → outcomeIndex=0, indexSet=1; NO token → outcomeIndex=1, indexSet=2
+    outcome_index = 0 if token_side.lower() == "yes" else 1
+    index_set = 1 << outcome_index
+
+    # condition_id (hex string) → bytes32
+    cid_bytes = bytes.fromhex(condition_id.lstrip("0x").zfill(64))
+
+    # Build redeemPositions(address,bytes32,bytes32,uint256[]) calldata
+    redeem_sel = keccak(b"redeemPositions(address,bytes32,bytes32,uint256[])")[:4]
+    redeem_calldata: bytes = redeem_sel + _abi_encode(
+        ["address", "bytes32", "bytes32", "uint256[]"],
+        [_USDC_CONTRACT, b"\x00" * 32, cid_bytes, [index_set]],
+    )
+
+    # Build proxy((uint8,address,uint256,bytes)[]) calldata (selector 0x34ee9791)
+    proxy_calldata: bytes = bytes.fromhex("34ee9791") + _abi_encode(
+        ["(uint8,address,uint256,bytes)[]"],
+        [[(1, _CTF_CONTRACT, 0, redeem_calldata)]],
+    )
+
+    account = Account.from_key(private_key)
+    eoa = account.address
+
+    try:
+        nonce_resp = await http_client.post(
+            rpc_url,
+            json={"jsonrpc": "2.0", "method": "eth_getTransactionCount",
+                  "params": [eoa, "pending"], "id": 1},
+            timeout=15.0,
+        )
+        nonce = int(nonce_resp.json()["result"], 16)
+
+        gp_resp = await http_client.post(
+            rpc_url,
+            json={"jsonrpc": "2.0", "method": "eth_gasPrice", "params": [], "id": 2},
+            timeout=15.0,
+        )
+        gas_price = int(int(gp_resp.json()["result"], 16) * 1.2)  # 20% buffer
+
+        tx = {
+            "to": _PROXY_FACTORY,
+            "from": eoa,
+            "nonce": nonce,
+            "gas": 250_000,
+            "gasPrice": gas_price,
+            "data": "0x" + proxy_calldata.hex(),
+            "value": 0,
+            "chainId": _POLYGON_CHAIN_ID,
+        }
+        signed = account.sign_transaction(tx)
+
+        send_resp = await http_client.post(
+            rpc_url,
+            json={"jsonrpc": "2.0", "method": "eth_sendRawTransaction",
+                  "params": ["0x" + signed.raw_transaction.hex()], "id": 3},
+            timeout=15.0,
+        )
+        resp = send_resp.json()
+        if "error" in resp:
+            err = resp["error"].get("message", str(resp["error"]))
+            log.warning("Redemption rejected condition_id=%.16s: %s", condition_id, err)
+            return False, err
+
+        tx_hash: str = resp.get("result", "")
+        log.info("Redemption submitted condition_id=%.16s tx=%s", condition_id, tx_hash)
+        return True, tx_hash
+
+    except Exception as exc:
+        log.warning("Redemption error condition_id=%.16s: %s", condition_id, exc)
+        return False, str(exc)
+
+
+# ---------------------------------------------------------------------------
 # Main polling loop
 # ---------------------------------------------------------------------------
 
@@ -342,6 +466,7 @@ async def run_settlement_loop(
     jsonl_dir: Path,
     writer: JsonlRunWriter,
     fetch_resolution: Callable,  # injectable for testing
+    redeem_fn: Callable | None = None,  # optional: async (condition_id, token_side) → (bool, str)
     poll_interval_seconds: float = 900.0,
     max_iterations: int = 0,  # 0 = run forever
     report_md_path: str | None = None,
@@ -391,12 +516,85 @@ async def run_settlement_loop(
         if settlements_written > 0 and report_md_path:
             _refresh_report(jsonl_dir, report_md_path)
 
+        # Attempt on-chain redemption for any winning positions not yet redeemed
+        if redeem_fn is not None:
+            await _redeem_pending_wins(
+                jsonl_dir=jsonl_dir,
+                writer=writer,
+                redeem_fn=redeem_fn,
+                now_fn=_now,
+            )
+
         if 0 < max_iterations <= iteration:
             log.info("Reached max_iterations=%d. Exiting.", max_iterations)
             return
 
         if poll_interval_seconds > 0:
             await asyncio.sleep(poll_interval_seconds)
+
+
+async def _redeem_pending_wins(
+    *,
+    jsonl_dir: Path,
+    writer: JsonlRunWriter,
+    redeem_fn: Callable,
+    now_fn: Callable[[], datetime],
+) -> None:
+    """Scan JSONL for WIN settlements without a completed redemption and attempt redemption.
+
+    One redemption attempt per condition_id per poll cycle.  Already-completed
+    redemptions (event=redemption_completed) are permanently skipped.
+    """
+    all_rows = _read_all_jsonl_rows(jsonl_dir)
+    redeemed_cids = _collect_redeemed_condition_ids(all_rows)
+
+    # Collect the first WIN settlement event per condition_id that needs redemption
+    pending: dict[str, dict] = {}
+    for _fname, row in all_rows:
+        if row.get("event") != "settlement_update":
+            continue
+        if row.get("resolved_outcome") != "win":
+            continue
+        cid = row.get("condition_id", "")
+        if not cid or cid in redeemed_cids or cid in pending:
+            continue
+        pending[cid] = row
+
+    if not pending:
+        return
+
+    log.info("Attempting redemption for %d winning condition(s)", len(pending))
+
+    for cid, win_row in pending.items():
+        token_side = win_row.get("token_side", "yes")
+        success, result = await redeem_fn(condition_id=cid, token_side=token_side)
+
+        redemption_event: dict[str, Any] = {
+            "event": "redemption_completed" if success else "redemption_pending",
+            "condition_id": cid,
+            "market_slug": win_row.get("market_slug", ""),
+            "token_id": win_row.get("token_id", ""),
+            "token_side": token_side,
+            "shares": win_row.get("shares", 0.0),
+            "timestamp": now_fn().isoformat(),
+        }
+        if success:
+            redemption_event["tx_hash"] = result
+        else:
+            redemption_event["error"] = result
+
+        writer.write(redemption_event)
+
+        if success:
+            log.info(
+                "Redemption completed condition_id=%.16s shares=%.4f tx=%s",
+                cid, win_row.get("shares", 0.0), result,
+            )
+        else:
+            log.warning(
+                "Redemption pending condition_id=%.16s: %s (will retry next poll)",
+                cid, result,
+            )
 
 
 def _refresh_report(jsonl_dir: Path, report_md_path: str) -> None:
@@ -444,6 +642,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 async def _async_main(args: argparse.Namespace) -> None:
+    import os
+
     try:
         import httpx
     except ImportError:
@@ -451,6 +651,9 @@ async def _async_main(args: argparse.Namespace) -> None:
 
     jsonl_dir = Path(args.output_dir)
     writer = JsonlRunWriter(jsonl_dir / "settlement.jsonl")
+
+    rpc_url = os.environ.get("POLYMARKET_RPC_URL", "")
+    private_key = os.environ.get("POLYMARKET_PRIVATE_KEY", "")
 
     async with httpx.AsyncClient() as client:
         async def _fetch(*, token_id: str) -> MarketResolution | None:
@@ -460,10 +663,27 @@ async def _async_main(args: argparse.Namespace) -> None:
                 clob_base_url=args.clob_host,
             )
 
+        _redeem: Callable | None = None
+        if rpc_url and private_key:
+            async def _redeem(*, condition_id: str, token_side: str) -> tuple[bool, str]:
+                return await redeem_winning_position(
+                    condition_id=condition_id,
+                    token_side=token_side,
+                    rpc_url=rpc_url,
+                    private_key=private_key,
+                    http_client=client,
+                )
+            log.info("Auto-redemption enabled (POLYMARKET_RPC_URL + POLYMARKET_PRIVATE_KEY set)")
+        else:
+            log.warning(
+                "Auto-redemption disabled: POLYMARKET_RPC_URL and/or POLYMARKET_PRIVATE_KEY not set"
+            )
+
         await run_settlement_loop(
             jsonl_dir=jsonl_dir,
             writer=writer,
             fetch_resolution=_fetch,
+            redeem_fn=_redeem,
             poll_interval_seconds=args.poll_interval,
             max_iterations=args.max_iterations,
             report_md_path=args.report_md or None,
