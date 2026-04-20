@@ -43,6 +43,8 @@ class SportsStrategyPreset:
     max_hours_before_game: float | None = None  # None = no gate; only enter within N hours of game
     min_bid_ratio: float | None = None  # bid_size/(bid_size+ask_size) threshold; None=no gate
     min_clv_edge: float | None = None  # None = no CLV gate; 0.05 = require 5pp Polymarket discount vs Vegas
+    kelly_edge_estimate: float | None = None  # None = flat sizing; estimated edge fraction for Kelly
+    kelly_max_fraction: float = 0.25  # quarter-Kelly cap (overrideable per preset)
 
 
 def band_only_presets() -> tuple[SportsStrategyPreset, ...]:
@@ -214,6 +216,32 @@ def clv_focused_presets() -> tuple[SportsStrategyPreset, ...]:
         )
         for p in focused_presets()
     )
+
+
+def kelly_stake_usd(
+    *,
+    edge: float,
+    entry_price: float,
+    bankroll_usd: float,
+    max_fraction: float = 0.25,
+) -> float:
+    """
+    Full Kelly fraction capped at max_fraction of bankroll.
+
+    Args:
+        edge: Estimated edge as a fraction (e.g. 0.12 for 12pp edge).
+        entry_price: Polymarket ask price (e.g. 0.65).
+        bankroll_usd: Total bankroll in USD.
+        max_fraction: Cap on Kelly fraction (default 0.25 = quarter-Kelly).
+
+    Returns:
+        Dollar stake. 0.0 if edge <= 0 or entry_price >= 1.0.
+    """
+    if entry_price >= 1.0 or edge <= 0:
+        return 0.0
+    full_kelly = edge / (1.0 - entry_price)
+    fraction = min(full_kelly, max_fraction)
+    return bankroll_usd * fraction
 
 
 def should_enter_sports_market(

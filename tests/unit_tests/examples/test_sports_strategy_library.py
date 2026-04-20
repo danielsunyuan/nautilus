@@ -303,3 +303,53 @@ def test_clv_focused_presets_count_and_edge():
 def test_clv_focused_presets_names():
     presets = lib.clv_focused_presets()
     assert all("clv_focused" in p.name for p in presets)
+
+
+# ===== Kelly Criterion Tests =====
+
+def test_kelly_stake_usd_basic():
+    # edge=0.12, entry=0.65, bankroll=1000, max_fraction=0.25
+    # full_kelly = 0.12 / (1.0 - 0.65) = 0.12 / 0.35 = 0.3429
+    # capped at 0.25 → 250.0
+    result = lib.kelly_stake_usd(edge=0.12, entry_price=0.65, bankroll_usd=1000.0)
+    assert abs(result - 250.0) < 0.01
+
+
+def test_kelly_stake_usd_below_cap():
+    # edge=0.05, entry=0.65, bankroll=1000
+    # full_kelly = 0.05 / 0.35 = 0.1429 < 0.25 → 142.9
+    result = lib.kelly_stake_usd(edge=0.05, entry_price=0.65, bankroll_usd=1000.0)
+    assert abs(result - 142.86) < 0.1
+
+
+def test_kelly_stake_zero_edge():
+    assert lib.kelly_stake_usd(edge=0.0, entry_price=0.65, bankroll_usd=1000.0) == 0.0
+
+
+def test_kelly_stake_negative_edge():
+    assert lib.kelly_stake_usd(edge=-0.05, entry_price=0.65, bankroll_usd=1000.0) == 0.0
+
+
+def test_kelly_stake_entry_at_one():
+    # entry_price >= 1.0 → 0.0 (undefined)
+    assert lib.kelly_stake_usd(edge=0.10, entry_price=1.0, bankroll_usd=1000.0) == 0.0
+
+
+def test_kelly_stake_custom_max_fraction():
+    # max_fraction=0.10 → min(full_kelly, 0.10) * 1000
+    # full_kelly = 0.12 / 0.35 = 0.3429 > 0.10 → 100.0
+    result = lib.kelly_stake_usd(edge=0.12, entry_price=0.65, bankroll_usd=1000.0, max_fraction=0.10)
+    assert abs(result - 100.0) < 0.01
+
+
+def test_preset_has_kelly_edge_estimate():
+    preset = _make_preset(kelly_edge_estimate=0.12, kelly_max_fraction=0.25)
+    assert preset.kelly_edge_estimate == 0.12
+    assert preset.kelly_max_fraction == 0.25
+
+
+def test_preset_kelly_defaults_none():
+    preset = _make_preset()
+    assert preset.kelly_edge_estimate is None
+    # kelly_max_fraction default is 0.25
+    assert preset.kelly_max_fraction == 0.25

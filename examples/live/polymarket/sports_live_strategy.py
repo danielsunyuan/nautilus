@@ -16,6 +16,7 @@ try:
     from examples.live.polymarket.sports_strategy_library import (
         SportsStrategyPreset,
         should_enter_sports_market,
+        kelly_stake_usd,
     )
 except ModuleNotFoundError:
     module_name = "examples.live.polymarket.sports_strategy_library"
@@ -28,6 +29,7 @@ except ModuleNotFoundError:
     spec.loader.exec_module(module)
     SportsStrategyPreset = module.SportsStrategyPreset
     should_enter_sports_market = module.should_enter_sports_market
+    kelly_stake_usd = module.kelly_stake_usd
 
 
 class SportsPaperStrategyConfig(StrategyConfig, frozen=True):
@@ -127,7 +129,20 @@ class SportsPaperStrategy(Strategy):
         return False
 
     def _compute_order_quantity(self, ask: float) -> Decimal:
-        target_usd = self.config.target_usd_per_market
+        # Kelly sizing: if preset has kelly_edge_estimate, use Kelly formula for target USD
+        preset = self.config.preset
+        if preset.kelly_edge_estimate is not None:
+            bankroll_usd = float(self.config.order_qty) * 100.0
+            kelly_usd = kelly_stake_usd(
+                edge=preset.kelly_edge_estimate,
+                entry_price=ask,
+                bankroll_usd=bankroll_usd,
+                max_fraction=preset.kelly_max_fraction,
+            )
+            target_usd: Decimal | None = Decimal(str(kelly_usd)) if kelly_usd > 0 else None
+        else:
+            target_usd = self.config.target_usd_per_market
+
         if target_usd is None or target_usd <= 0:
             return self.config.order_qty
 
