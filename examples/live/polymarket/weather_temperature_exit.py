@@ -52,9 +52,11 @@ log = logging.getLogger("weather.exit")
 
 DEFAULT_OUTPUT_DIR = Path("/workspace/nautilus/outputs")
 
-# Same buffer as the live strategy to avoid on-chain balance rejections
-# (Polymarket deducts taker fee from received tokens at fill time).
-SELL_BUFFER_SHARES = Decimal("0.02")
+# Buffer to avoid on-chain balance rejections. Polymarket deducts taker fees
+# from received tokens at fill time, so the wallet balance can be slightly
+# less than the JSONL-recorded share count. 0.03 is conservative enough to
+# cover the fee haircut without leaving meaningful value on the table.
+SELL_BUFFER_SHARES = Decimal("0.03")
 
 
 # ---------------------------------------------------------------------------
