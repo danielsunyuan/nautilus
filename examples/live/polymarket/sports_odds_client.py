@@ -16,7 +16,8 @@ ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 
 POLYMARKET_SPORT_TO_ODDS_API: dict[str, str] = {
     "nba": "basketball_nba",
-    "tennis": "tennis_atp",   # ATP — WTA is "tennis_wta"
+    "tennis_atp": "tennis_atp",
+    "tennis_wta": "tennis_wta",
     "ufc": "mma_mixed_martial_arts",
     "mlb": "baseball_mlb",
 }
@@ -78,7 +79,7 @@ async def fetch_implied_prob(
         teams = {event.get("home_team", "").lower(), event.get("away_team", "").lower()}
         if home_team.lower() not in teams and away_team.lower() not in teams:
             continue
-        for bookmaker in event.get("bookmakers", [])[:3]:  # use first 3 books, average
+        for bookmaker in event.get("bookmakers", [])[:3]:  # return first match from up to 3 books
             for mkt in bookmaker.get("markets", []):
                 if mkt.get("key") != market:
                     continue
