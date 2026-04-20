@@ -91,7 +91,7 @@ def test_process_story_skips_duplicate_story_ids():
         path = Path(d) / "signals.jsonl"
         result = m.process_story(
             story=story,
-            gamma_base_url="http://localhost:9999",  # offline
+            category_markets={},
             min_relevance=0.1,
             signal_path=path,
             emitted_story_ids=emitted,

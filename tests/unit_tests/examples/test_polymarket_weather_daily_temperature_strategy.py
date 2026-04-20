@@ -49,16 +49,21 @@ def _preset_by_name(name: str):
 
 def test_factory_returns_at_least_8_presets() -> None:
     presets = lib.daily_temperature_price_arena_presets()
-    assert len(presets) >= 8
+    assert len(presets) >= 13
 
 
 def test_factory_contains_required_names() -> None:
     names = {p.name for p in lib.daily_temperature_price_arena_presets()}
     required = {
+        "temp_50c_band_only",
         "temp_50c_basic",
+        "temp_60c_band_only",
         "temp_60c_basic",
+        "temp_70c_band_only",
         "temp_70c_basic",
+        "temp_80c_band_only",
         "temp_80c_basic",
+        "temp_90c_band_only",
         "temp_90c_basic",
         "temp_70c_support",
         "temp_80c_support",
@@ -68,6 +73,14 @@ def test_factory_contains_required_names() -> None:
 
 
 def test_preset_defaults() -> None:
+    p = _preset_by_name("temp_50c_band_only")
+    assert p.max_spread == 0.03
+    assert p.min_ask_size == 5.0
+    assert p.order_qty == 10.0
+    assert p.mode == "band_only"
+
+
+def test_basic_preset_defaults() -> None:
     p = _preset_by_name("temp_50c_basic")
     assert p.max_spread == 0.03
     assert p.min_ask_size == 5.0
@@ -82,6 +95,28 @@ def test_preset_is_frozen() -> None:
         assert False, "should have raised"
     except AttributeError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# temp_50c_band_only  (ask 0.50 - 0.60, ignores spread/liquidity)
+# ---------------------------------------------------------------------------
+
+def test_temp_50c_band_only_entry_inside_arena() -> None:
+    p = _preset_by_name("temp_50c_band_only")
+    assert lib.should_enter_temperature_market(preset=p, **_market(bid=0.53, ask=0.55))
+
+
+def test_temp_50c_band_only_ignores_wide_spread_and_small_ask_size() -> None:
+    p = _preset_by_name("temp_50c_band_only")
+    assert lib.should_enter_temperature_market(
+        preset=p,
+        **_market(bid=0.10, ask=0.55, ask_size=1.0),
+    )
+
+
+def test_temp_50c_band_only_rejected_above_arena() -> None:
+    p = _preset_by_name("temp_50c_band_only")
+    assert not lib.should_enter_temperature_market(preset=p, **_market(bid=0.58, ask=0.60))
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +236,7 @@ def test_temp_80c_basic_rejected_ask_size_too_small() -> None:
 
 
 # ---------------------------------------------------------------------------
-# temp_90c_basic  (ask 0.90 - 0.981, i.e. <= 0.98)
+# temp_90c_basic  (ask 0.90 - 0.98, i.e. < 0.98; take_profit_price=0.99)
 # ---------------------------------------------------------------------------
 
 def test_temp_90c_basic_entry_inside_arena() -> None:
@@ -210,8 +245,10 @@ def test_temp_90c_basic_entry_inside_arena() -> None:
 
 
 def test_temp_90c_basic_entry_at_upper_boundary() -> None:
+    # max_ask=0.98 is exclusive: ask=0.979 enters, ask=0.98 is rejected
     p = _preset_by_name("temp_90c_basic")
-    assert lib.should_enter_temperature_market(preset=p, **_market(bid=0.96, ask=0.98))
+    assert lib.should_enter_temperature_market(preset=p, **_market(bid=0.96, ask=0.979))
+    assert not lib.should_enter_temperature_market(preset=p, **_market(bid=0.96, ask=0.98))
 
 
 def test_temp_90c_basic_rejected_below_arena() -> None:

@@ -268,6 +268,21 @@ def test_paper_balances_start_at_1000_usdc() -> None:
     assert "1_000" in source
 
 
+def test_strategy_presets_for_supported_sets_cover_band_only_variants() -> None:
+    all_presets = daemon._strategy_presets_for_set("all")
+    band_only_presets = daemon._strategy_presets_for_set("band_only")
+    basic_presets = daemon._strategy_presets_for_set("basic")
+    support_presets = daemon._strategy_presets_for_set("support")
+    live_presets = daemon._strategy_presets_for_set("live_90_basic")
+
+    assert len(all_presets) >= 13
+    assert len(band_only_presets) == 5
+    assert {p.mode for p in band_only_presets} == {"band_only"}
+    assert {p.mode for p in basic_presets} == {"basic"}
+    assert {p.mode for p in support_presets} == {"support"}
+    assert [p.name for p in live_presets] == ["temp_90c_basic"]
+
+
 # ---------------------------------------------------------------------------
 # Orchestration: round_start and round_end events
 # ---------------------------------------------------------------------------
