@@ -158,6 +158,12 @@ def scan_unresolved_entries(jsonl_dir: Path) -> list[UnresolvedEntry]:
         if row.get("resolved") is True:
             continue
         condition_id = row.get("condition_id", "")
+        if not condition_id:
+            instrument_id = row.get("instrument_id", "")
+            if instrument_id:
+                condition_id = instrument_id.split(".POLYMARKET")[0].rsplit("-", 1)[0]
+        if not condition_id:
+            continue
         if condition_id in settled:
             continue
         entries.append(

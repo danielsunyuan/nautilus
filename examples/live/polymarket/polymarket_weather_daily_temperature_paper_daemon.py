@@ -22,6 +22,7 @@ import asyncio
 from collections.abc import Awaitable
 from collections.abc import Callable
 from datetime import UTC
+from datetime import date as _date
 from datetime import datetime
 from decimal import Decimal
 import importlib.util
@@ -30,6 +31,7 @@ import os
 from pathlib import Path
 import random
 import re
+import signal
 import sys
 import uuid
 from typing import Any
@@ -100,6 +102,7 @@ from nautilus_trader.config import LiveExecEngineConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import MessageBusConfig
 from nautilus_trader.config import TradingNodeConfig
+from nautilus_trader.core.datetime import unix_nanos_to_dt
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.currencies import USDC_POS
 from nautilus_trader.model.identifiers import InstrumentId
@@ -115,6 +118,31 @@ _SAFE_PRESET_SET = re.compile(r"^[A-Za-z0-9_-]+$")
 
 class RecoverableDaemonError(RuntimeError):
     """Raised for recoverable session or round runtime failures."""
+
+
+_NODE_BUILD_TIMEOUT_SECS = 180
+
+
+def _node_build_with_sigalrm(node: Any) -> None:
+    """Call node.build() with a SIGALRM hard timeout.
+
+    node.build() makes synchronous HTTP calls (instrument loading) that can
+    block the event loop indefinitely.  asyncio.wait_for cannot interrupt it;
+    SIGALRM fires even while the loop is blocked.
+    """
+
+    def _alarm_handler(signum: int, frame: object) -> None:  # noqa: ARG001
+        raise RecoverableDaemonError(
+            f"node.build() timed out after {_NODE_BUILD_TIMEOUT_SECS}s"
+        )
+
+    old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(_NODE_BUILD_TIMEOUT_SECS)
+    try:
+        node.build()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 class JsonlRunWriter:
@@ -141,6 +169,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_RECONNECT_DELAY,
         help="seconds to wait after recoverable errors",
     )
+    parser.add_argument(
+        "--capital-budget",
+        type=float,
+        default=None,
+        help="max USD to deploy lifetime for this preset set (e.g. 50.0). Daemon sleeps "
+             "until midnight UTC when exhausted. Omit for no limit.",
+    )
     return parser
 
 
@@ -152,6 +187,40 @@ def build_output_path(*, output_dir: str | Path, preset_set: str, now: datetime)
         raise ValueError("preset_set must contain only letters, numbers, '_' or '-'")
     stamp = now.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
     return root.resolve(strict=False) / "polymarket" / "runs" / f"weather_temp_{preset_set}_{stamp}.jsonl"
+
+
+def _compute_total_deployed(
+    output_dir: str | Path,
+    preset_set_prefix: str,
+    date=None,
+) -> Decimal:
+    """Sum stake values from strategy_result events across JSONL files for this daemon.
+
+    When *date* is provided (a datetime.date), only events whose ``timestamp``
+    starts with that date's ISO prefix (YYYY-MM-DD) are counted.  This enables
+    a per-day budget cap — the default ``--capital-budget`` semantics.
+    """
+    total = Decimal("0")
+    runs_dir = Path(output_dir).resolve(strict=False) / "polymarket" / "runs"
+    if not runs_dir.exists():
+        return total
+    date_prefix: str | None = date.isoformat() if date is not None else None
+    for path in runs_dir.glob(f"*{preset_set_prefix}*.jsonl"):
+        try:
+            with path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    obj = json.loads(line)
+                    if obj.get("event") == "strategy_result":
+                        if date_prefix is not None:
+                            ts = obj.get("timestamp", "")
+                            if not str(ts).startswith(date_prefix):
+                                continue
+                        stake = obj.get("stake")
+                        if stake is not None:
+                            total += Decimal(str(stake))
+        except Exception:
+            pass
+    return total
 
 
 def _env_first(*names: str) -> str | None:
@@ -174,6 +243,10 @@ def _strategy_presets_for_set(
     all_presets = daily_temperature_price_arena_presets()
     if normalized in {"all", "full"}:
         return all_presets
+    if normalized in {"live_90_basic", "live-weather-v1"}:
+        return tuple(p for p in all_presets if p.name == "temp_90c_basic")
+    if normalized in {"band_only", "band-only"}:
+        return tuple(p for p in all_presets if p.mode == "band_only")
     if normalized == "basic":
         return tuple(p for p in all_presets if p.mode == "basic")
     if normalized == "support":
@@ -243,7 +316,7 @@ def build_daemon_node_config(
                 fee_model_path="nautilus_trader.adapters.polymarket.fee_model.PolymarketFeeModel",
             ),
         },
-        timeout_connection=20.0,
+        timeout_connection=90.0,
         timeout_portfolio=10.0,
         timeout_disconnection=10.0,
         timeout_post_stop=5.0,
@@ -252,7 +325,7 @@ def build_daemon_node_config(
 
 def _build_instrument_id(market: DailyTemperatureMarket, token_side: str = "yes") -> str:
     token_id = market.yes_token_id if token_side == "yes" else market.no_token_id
-    return f"{token_id}.POLYMARKET"
+    return f"{market.condition_id}-{token_id}.POLYMARKET"
 
 
 async def run_daemon(
@@ -324,10 +397,47 @@ async def run_daemon(
                 },
             )
 
+        # --- filter to near-term markets only (observation_date >= today) ---
+        today = _date.today()
+        tradeable_markets = [m for m in markets if m.observation_date >= today]
+        # Sort by observation_date ascending (nearest first) and cap at 100
+        tradeable_markets.sort(key=lambda m: m.observation_date)
+        tradeable_markets = tradeable_markets[:100]
+
+        writer.write(
+            {
+                "run_id": daemon_run_id,
+                "event": "markets_filtered",
+                "asset_class": "weather",
+                "weather_market_type": "daily_temperature",
+                "preset_set": preset_set,
+                "markets_total": len(markets),
+                "markets_tradeable": len(tradeable_markets),
+                "filter_date": str(today),
+                "timestamp": started_at.isoformat(),
+            },
+        )
+
+        if not tradeable_markets:
+            writer.write(
+                {
+                    "run_id": daemon_run_id,
+                    "event": "round_end",
+                    "asset_class": "weather",
+                    "weather_market_type": "daily_temperature",
+                    "preset_set": preset_set,
+                    "reason": "no_tradeable_markets",
+                    "timestamp": started_at.isoformat(),
+                },
+            )
+            rounds_completed += 1
+            await sleep_between_rounds()
+            continue
+
         # --- run round ---
         try:
             rows = await run_round(
-                markets=markets,
+                markets=tradeable_markets,
                 preset_set=preset_set,
             )
         except RecoverableDaemonError as exc:
@@ -373,6 +483,101 @@ async def run_daemon(
         await sleep_between_rounds()
 
 
+def _as_decimal(value: Any) -> Decimal:
+    if hasattr(value, "as_decimal"):
+        return Decimal(str(value.as_decimal()))
+    return Decimal(str(value))
+
+
+def _iso8601_from_unix_nanos(timestamp_ns: int | None) -> str | None:
+    if not timestamp_ns:
+        return None
+    return unix_nanos_to_dt(int(timestamp_ns)).isoformat()
+
+
+def extract_weather_strategy_results(
+    *,
+    cache: Any,
+    markets: list[DailyTemperatureMarket],
+    presets: tuple[Any, ...],
+    strategy_ids_by_key: dict[str, StrategyId],
+) -> list[dict[str, Any]]:
+    """Extract open positions from the cache for each (market, preset) pair."""
+    rows: list[dict[str, Any]] = []
+    for market in markets:
+        instrument_id_str = _build_instrument_id(market, "yes")
+        cache_instrument_id = InstrumentId.from_str(instrument_id_str)
+        for preset in presets:
+            strategy_key = f"{market.slug}:{preset.name}"
+            strategy_id = strategy_ids_by_key.get(strategy_key)
+            if strategy_id is None:
+                continue
+
+            open_positions = list(
+                cache.positions_open(
+                    instrument_id=cache_instrument_id,
+                    strategy_id=strategy_id,
+                ),
+            )
+            if open_positions:
+                pos = open_positions[-1]
+                shares = float(_as_decimal(getattr(pos, "peak_qty", None) or pos.quantity))
+                entry_price = float(pos.avg_px_open)
+                stake = float(Decimal(str(entry_price)) * Decimal(str(shares)))
+                rows.append(
+                    {
+                        "event": "strategy_result",
+                        "preset_name": preset.name,
+                        "arena": preset.arena,
+                        "mode": preset.mode,
+                        "market_slug": market.slug,
+                        "city": market.city,
+                        "observation_date": str(market.observation_date),
+                        "threshold_f": market.threshold_f,
+                        "metric": market.metric,
+                        "token_side": "yes",
+                        "condition_id": market.condition_id,
+                        "instrument_id": instrument_id_str,
+                        "entry_price": entry_price,
+                        "shares": shares,
+                        "stake": stake,
+                        "accounting_status": "open",
+                        "resolved": False,
+                        "exit_reason": "position_open",
+                        "entry_time": _iso8601_from_unix_nanos(getattr(pos, "ts_opened", 0)),
+                        "exit_time": None,
+                        "pnl": None,
+                    },
+                )
+            else:
+                rows.append(
+                    {
+                        "event": "strategy_result",
+                        "preset_name": preset.name,
+                        "arena": preset.arena,
+                        "mode": preset.mode,
+                        "market_slug": market.slug,
+                        "city": market.city,
+                        "observation_date": str(market.observation_date),
+                        "threshold_f": market.threshold_f,
+                        "metric": market.metric,
+                        "token_side": "yes",
+                        "condition_id": market.condition_id,
+                        "instrument_id": instrument_id_str,
+                        "entry_price": None,
+                        "shares": None,
+                        "stake": None,
+                        "accounting_status": "no_position",
+                        "resolved": False,
+                        "exit_reason": "no_position",
+                        "entry_time": None,
+                        "exit_time": None,
+                        "pnl": None,
+                    },
+                )
+    return rows
+
+
 async def _default_run_round(
     *,
     markets: list[DailyTemperatureMarket],
@@ -391,6 +596,17 @@ async def _default_run_round(
     )
     node = TradingNode(config=config)
     strategy_ids_by_key: dict[str, StrategyId] = {}
+    family_instrument_ids_by_market_slug: dict[str, tuple[InstrumentId, ...]] = {}
+
+    families: dict[tuple[str, str, str], list[InstrumentId]] = {}
+    for market in markets:
+        family_key = (market.city, str(market.observation_date), market.metric)
+        families.setdefault(family_key, []).append(InstrumentId.from_str(_build_instrument_id(market, "yes")))
+    for market in markets:
+        family_key = (market.city, str(market.observation_date), market.metric)
+        family_instrument_ids_by_market_slug[market.slug] = tuple(families.get(family_key, []))
+
+    live_mode = str(preset_set).strip().lower() in {"live_90_basic", "live-weather-v1"}
 
     for market in markets:
         inst_id_str = _build_instrument_id(market, "yes")
@@ -403,6 +619,12 @@ async def _default_run_round(
                     preset=preset,
                     order_qty=Decimal(str(preset.order_qty)),
                     token_side="yes",
+                    family_instrument_ids=family_instrument_ids_by_market_slug.get(market.slug, ()),
+                    target_usd_per_market=(Decimal("5") if live_mode else None),
+                    min_order_size_shares=(Decimal("5") if live_mode else Decimal("0")),
+                    max_stake_per_market=(Decimal("5.25") if live_mode else None),
+                    max_open_positions=(8 if live_mode else None),
+                    max_total_open_stake=(Decimal("40") if live_mode else None),
                 ),
             )
             node.trader.add_strategy(strategy)
@@ -410,28 +632,47 @@ async def _default_run_round(
 
     node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
     node.add_exec_client_factory(POLYMARKET, SandboxLiveExecClientFactory)
-    node.build()
+    _node_build_with_sigalrm(node)
 
     try:
         run_task = asyncio.create_task(node.run_async())
         # Weather markets run longer; wait for resolution or external stop
-        await asyncio.sleep(60.0)
-        await node.stop_async()
-        await run_task
+        await asyncio.sleep(90.0)
+        try:
+            await asyncio.wait_for(node.stop_async(), timeout=30.0)
+        except asyncio.TimeoutError:
+            run_task.cancel()
+        try:
+            await asyncio.wait_for(run_task, timeout=10.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+        return extract_weather_strategy_results(
+            cache=node.cache,
+            markets=markets,
+            presets=presets,
+            strategy_ids_by_key=strategy_ids_by_key,
+        )
     except Exception as exc:
         raise RecoverableDaemonError(str(exc)) from exc
     finally:
-        node.kernel.dispose()
+        try:
+            node.kernel.dispose()
+        except Exception:
+            pass
         if node.kernel.executor:
-            node.kernel.executor.shutdown(wait=True, cancel_futures=True)
+            node.kernel.executor.shutdown(wait=False, cancel_futures=True)
 
-    return []
+
+_BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 
 async def _default_resolve_markets() -> list[DailyTemperatureMarket]:
     from nautilus_trader.core.nautilus_pyo3 import HttpClient
 
-    http_client = HttpClient(timeout_secs=15)
+    http_client = HttpClient(
+        timeout_secs=15,
+        default_headers={"User-Agent": _BROWSER_UA},
+    )
     return await discover_daily_temperature_markets(
         http_client=http_client,
         gamma_base_url="https://gamma-api.polymarket.com",
