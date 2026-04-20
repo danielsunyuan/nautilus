@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import defaultdict
 from collections.abc import Awaitable
 from collections.abc import Callable
 from datetime import UTC
@@ -281,6 +282,11 @@ def _build_instrument_id(market: SportsMarket) -> str:
     return f"{market.condition_id}-{market.token_id}.POLYMARKET"
 
 
+def _game_key(market: SportsMarket) -> str:
+    """Stable grouping key for markets from the same game."""
+    return f"{market.match_title}|{market.game_time}"
+
+
 def _group_markets_by_game(markets: list[SportsMarket]) -> dict[str, list[str]]:
     """
     Group market instrument IDs by game (match_title + game_time).
@@ -289,11 +295,9 @@ def _group_markets_by_game(markets: list[SportsMarket]) -> dict[str, list[str]]:
     markets from that game. Used to populate family_instrument_ids so the
     strategy can avoid taking opposing positions in the same game.
     """
-    from collections import defaultdict
     groups: dict[str, list[str]] = defaultdict(list)
     for market in markets:
-        game_key = f"{market.match_title}|{market.game_time}"
-        groups[game_key].append(_build_instrument_id(market))
+        groups[_game_key(market)].append(_build_instrument_id(market))
     return dict(groups)
 
 
@@ -599,10 +603,9 @@ async def _default_run_round(
 
     for market in markets:
         inst_id_str = _build_instrument_id(market)
-        game_key = f"{market.match_title}|{market.game_time}"
         family_inst_ids = tuple(
             InstrumentId.from_str(iid)
-            for iid in game_groups.get(game_key, [])
+            for iid in game_groups.get(_game_key(market), [])
             if iid != inst_id_str
         )
         for preset in presets:
