@@ -113,6 +113,30 @@ The CLOB mid-price reflects what participants with access to the correct data so
 - **Crypto markets** — resolution source is a specific exchange or index, not just any price feed.
 - **Any other event market** — always read the ruleset first.
 
+### Known resolution sources — Polymarket weather markets
+
+All temperature markets observed so far resolve via **Weather Underground** (`wunderground.com`), using the daily history page for a specific airport station. The URL pattern is:
+`https://www.wunderground.com/history/daily/{country}/{city}/{STATION_CODE}`
+
+| City | Wunderground Station | URL suffix |
+|---|---|---|
+| Austin | KAUS | `us/austin/KAUS` |
+| Los Angeles | KLAX | `us/los-angeles/KLAX` |
+| San Francisco | KSFO | `us/san-francisco/KSFO` |
+| Madrid | LEMD | `es/madrid/LEMD` |
+| Milan | LIMC | `it/milan/LIMC` |
+| Amsterdam | EHAM | `nl/amsterdam/EHAM` |
+| Munich | EDDM | `de/munich/EDDM` |
+| Warsaw | EPWA | `pl/warsaw/EPWA` |
+| London | EGLC | `gb/london/EGLC` |
+| Paris | LFPG | `fr/paris/LFPG` |
+| Chongqing | ZUCK | `cn/chongqing/ZUCK` |
+| Wuhan | ZHHH | `cn/wuhan/ZHHH` |
+| Panama City | MPMG | `pa/panama-city/MPMG` |
+| Istanbul | N/A | NOAA `weather.gov/wrh/timeseries?site=LTFM` — "Temp" column daily max |
+
+For any new city, always fetch the market ruleset from Gamma to confirm the station code before acting.
+
 ## Fee Model
 
 The sandbox execution client supports pluggable fee models via `SandboxExecutionClientConfig.fee_model_path`.
