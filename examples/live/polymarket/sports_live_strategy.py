@@ -36,6 +36,7 @@ class SportsPaperStrategyConfig(StrategyConfig, frozen=True):
     order_qty: Decimal
     sport: str = ""
     market_type: str = ""
+    game_time: str = ""
     family_instrument_ids: tuple[InstrumentId, ...] = ()
     target_usd_per_market: Decimal | None = None
     min_order_size_shares: Decimal = Decimal("0")
@@ -173,6 +174,7 @@ class SportsPaperStrategy(Strategy):
             ask_size=ask_size,
             sport=self.config.sport,
             market_type=self.config.market_type,
+            game_time=self.config.game_time,
         ):
             return
 

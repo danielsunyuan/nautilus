@@ -22,6 +22,7 @@ class SportsStrategyPreset:
     mode: str = "band_only"        # "band_only" or "basic"
     allowed_sports: frozenset[str] | None = None        # None = all sports
     allowed_market_types: frozenset[str] | None = None  # None = all market types
+    max_hours_before_game: float | None = None  # None = no gate; only enter within N hours of game
 
 
 def band_only_presets() -> tuple[SportsStrategyPreset, ...]:
@@ -164,6 +165,7 @@ def should_enter_sports_market(
     ask_size: float,
     sport: str = "",
     market_type: str = "",
+    game_time: str = "",
 ) -> bool:
     """
     Pure entry decision function.
@@ -189,6 +191,16 @@ def should_enter_sports_market(
     # Market type whitelist
     if preset.allowed_market_types is not None and market_type not in preset.allowed_market_types:
         return False
+    # Time-to-game gate
+    if preset.max_hours_before_game is not None and game_time:
+        try:
+            from datetime import UTC, datetime
+            gt = datetime.fromisoformat(game_time.replace("Z", "+00:00"))
+            hours_until = (gt - datetime.now(tz=UTC)).total_seconds() / 3600
+            if hours_until > preset.max_hours_before_game:
+                return False
+        except (ValueError, TypeError):
+            pass  # unparseable game_time — don't block
 
     # --- basic gates ---
     if ask < preset.min_ask:

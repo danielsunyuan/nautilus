@@ -140,3 +140,42 @@ def test_focused_presets_allow_nba_totals():
         for p in presets
     )
     assert any_nba_totals
+
+
+def test_time_gate_blocks_far_future_game():
+    from datetime import UTC, datetime, timedelta
+    preset = _make_preset(max_hours_before_game=2.0)
+    game_time = (datetime.now(tz=UTC) + timedelta(hours=4)).isoformat()
+    assert not should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+        sport="tennis", market_type="moneyline", game_time=game_time,
+    )
+
+
+def test_time_gate_allows_imminent_game():
+    from datetime import UTC, datetime, timedelta
+    preset = _make_preset(max_hours_before_game=2.0)
+    game_time = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+    assert should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+        sport="tennis", market_type="moneyline", game_time=game_time,
+    )
+
+
+def test_no_time_gate_passes_any_game_time():
+    from datetime import UTC, datetime, timedelta
+    preset = _make_preset()  # max_hours_before_game=None
+    game_time = (datetime.now(tz=UTC) + timedelta(hours=24)).isoformat()
+    assert should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+        sport="tennis", market_type="moneyline", game_time=game_time,
+    )
+
+
+def test_empty_game_time_passes_with_gate():
+    """Markets with no game_time (game_time='') should not be blocked by the gate."""
+    preset = _make_preset(max_hours_before_game=1.0)
+    assert should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+        sport="tennis", market_type="moneyline", game_time="",
+    )

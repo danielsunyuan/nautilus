@@ -549,6 +549,7 @@ async def _default_run_round(
                     order_qty=Decimal(str(preset.order_qty)),
                     sport=market.sport,
                     market_type=market.market_type,
+                    game_time=market.game_time,
                 ),
             )
             node.trader.add_strategy(strategy)
