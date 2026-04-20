@@ -8,7 +8,7 @@ the daemon handles the coarser pre-filter (already-started games).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 
@@ -169,12 +169,13 @@ def depth_focused_presets() -> tuple[SportsStrategyPreset, ...]:
     Concept ported from BTC microprice_support strategy (+0.16% avg ROI, 56.6% WR).
     Re-run baseline analysis before adjusting the threshold.
     """
-    base = focused_presets()
     return tuple(
-        SportsStrategyPreset(
-            **{**vars(p) | {"name": p.name.replace("focused", "depth_focused"), "min_bid_ratio": 0.55}}
+        replace(
+            p,
+            name=p.name.replace("focused", "depth_focused"),
+            min_bid_ratio=0.55,
         )
-        for p in base
+        for p in focused_presets()
     )
 
 

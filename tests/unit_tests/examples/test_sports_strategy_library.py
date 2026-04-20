@@ -226,3 +226,33 @@ def test_no_bid_ratio_passes_ask_heavy_book():
         preset=preset, bid=0.62, ask=0.63, bid_size=10, ask_size=90,
         sport="tennis", market_type="moneyline",
     )
+
+
+def test_depth_focused_presets_count_and_ratio():
+    presets = lib.depth_focused_presets()
+    assert len(presets) == 10  # 2 per arena × 5 arenas
+    assert all(p.min_bid_ratio == 0.55 for p in presets)
+
+
+def test_depth_focused_presets_names():
+    presets = lib.depth_focused_presets()
+    assert all("depth_focused" in p.name for p in presets)
+    assert all("focused" in p.name for p in presets)
+
+
+def test_depth_focused_presets_inherit_whitelists():
+    focused = lib.focused_presets()
+    depth = lib.depth_focused_presets()
+    for fp, dp in zip(focused, depth):
+        assert fp.allowed_sports == dp.allowed_sports
+        assert fp.allowed_market_types == dp.allowed_market_types
+        assert fp.mode == dp.mode
+
+
+def test_depth_focused_presets_block_mlb():
+    presets = lib.depth_focused_presets()
+    for preset in presets:
+        assert not should_enter_sports_market(
+            preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+            sport="mlb", market_type="moneyline",
+        ), f"{preset.name} should not enter mlb moneyline"
