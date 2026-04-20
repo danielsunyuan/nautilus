@@ -32,6 +32,7 @@ import os
 from pathlib import Path
 import random
 import re
+import signal
 import sys
 import uuid
 from typing import Any
@@ -61,6 +62,7 @@ try:
     from examples.live.polymarket.crypto_5m_strategy_library import entry_grid_strategy_presets
     from examples.live.polymarket.crypto_5m_strategy_library import first_wave_strategy_presets
     from examples.live.polymarket.crypto_5m_strategy_library import live_edge_strategy_presets
+    from examples.live.polymarket.crypto_5m_strategy_library import ninety_only_strategy_presets
     from examples.live.polymarket.crypto_5m_strategy_library import research_strategy_presets
     from examples.live.polymarket.crypto_5m_strategy_library import smoke_test_strategy_presets
 except ModuleNotFoundError:
@@ -76,6 +78,7 @@ except ModuleNotFoundError:
     entry_grid_strategy_presets = module.entry_grid_strategy_presets
     first_wave_strategy_presets = module.first_wave_strategy_presets
     live_edge_strategy_presets = module.live_edge_strategy_presets
+    ninety_only_strategy_presets = module.ninety_only_strategy_presets
     research_strategy_presets = module.research_strategy_presets
     smoke_test_strategy_presets = module.smoke_test_strategy_presets
 
@@ -126,6 +129,31 @@ class RecoverableDaemonError(RuntimeError):
     """Raised for recoverable session or round runtime failures."""
 
 
+_NODE_BUILD_TIMEOUT_SECS = 180
+
+
+def _node_build_with_sigalrm(node: Any) -> None:
+    """Call node.build() with a SIGALRM hard timeout.
+
+    node.build() makes synchronous HTTP calls (instrument loading) that can
+    block the event loop indefinitely.  asyncio.wait_for cannot interrupt it;
+    SIGALRM fires even while the loop is blocked.
+    """
+
+    def _alarm_handler(signum: int, frame: object) -> None:  # noqa: ARG001
+        raise RecoverableDaemonError(
+            f"node.build() timed out after {_NODE_BUILD_TIMEOUT_SECS}s"
+        )
+
+    old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(_NODE_BUILD_TIMEOUT_SECS)
+    try:
+        node.build()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
 class JsonlRunWriter:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -157,6 +185,18 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_EXECUTION_CUTOFF_SECONDS,
         help="stop the round runner this many seconds before market end",
+    )
+    parser.add_argument(
+        "--utc-hour-min",
+        type=int,
+        default=0,
+        help="skip rounds whose entry UTC hour is below this value (0-23, inclusive lower bound)",
+    )
+    parser.add_argument(
+        "--utc-hour-max",
+        type=int,
+        default=24,
+        help="skip rounds whose entry UTC hour is at or above this value (1-24, exclusive upper bound)",
     )
     return parser
 
@@ -202,6 +242,8 @@ def _strategy_presets_for_set(preset_set: str):
         return tuple(preset for preset in all_strategy_presets() if "momentum" in preset.mode)
     if normalized == "flow":
         return tuple(preset for preset in all_strategy_presets() if "flow" in preset.mode)
+    if normalized == "ninety_only":
+        return ninety_only_strategy_presets()
     raise ValueError(f"unsupported preset set {preset_set!r}")
 
 
@@ -520,8 +562,14 @@ async def _run_node_until_deadline(
     run_task = asyncio.create_task(node.run_async())
     try:
         await sleeper(max(0.0, float(duration_seconds)))
-        await node.stop_async()
-        await run_task
+        try:
+            await asyncio.wait_for(node.stop_async(), timeout=30.0)
+        except asyncio.TimeoutError:
+            run_task.cancel()
+        try:
+            await asyncio.wait_for(run_task, timeout=10.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
     finally:
         if not run_task.done():
             run_task.cancel()
@@ -563,7 +611,7 @@ async def _default_run_round(
             strategy_ids_by_preset[_strategy_key_for_preset(preset, token_side)] = strategy.id
     node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
     node.add_exec_client_factory(POLYMARKET, SandboxLiveExecClientFactory)
-    node.build()
+    _node_build_with_sigalrm(node)
 
     now = datetime.now(tz=UTC)
     runtime_seconds = max(
@@ -600,8 +648,14 @@ async def _sleep_until_next_round(*, session: Any) -> None:
         await asyncio.sleep(delay)
 
 
+_BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+
 async def _resolve_session(asset: str, gamma_host: str, timeout: float):
-    http_client = HttpClient(timeout_secs=max(1, math.ceil(timeout)))
+    http_client = HttpClient(
+        timeout_secs=max(1, math.ceil(timeout)),
+        default_headers={"User-Agent": _BROWSER_UA},
+    )
     return await resolve_crypto_5m_session(
         asset=asset,
         http_client=http_client,
@@ -624,6 +678,8 @@ async def run_daemon(
     backoff_sleep: Callable[[float], Awaitable[None]] | None = None,
     reconnect_delay: float = DEFAULT_RECONNECT_DELAY,
     execution_cutoff_seconds: float = DEFAULT_EXECUTION_CUTOFF_SECONDS,
+    utc_hour_min: int = 0,
+    utc_hour_max: int = 24,
 ) -> None:
     rounds_completed = 0
     daemon_run_id = run_id or uuid.uuid4().hex
@@ -658,6 +714,23 @@ async def run_daemon(
             )
             rounds_completed += 1
             await backoff(_backoff_delay(reconnect_delay))
+            continue
+
+        utc_hour = now_fn().astimezone(UTC).hour
+        if not (utc_hour_min <= utc_hour < utc_hour_max):
+            writer.write(
+                {
+                    "run_id": daemon_run_id,
+                    "event": "round_skipped",
+                    "asset": asset,
+                    "preset_set": preset_set,
+                    "slug": session.slug,
+                    "reason": f"UTC hour {utc_hour} outside allowed window [{utc_hour_min}, {utc_hour_max})",
+                    "timestamp": now_fn().astimezone(UTC).isoformat(),
+                },
+            )
+            rounds_completed += 1
+            await sleep_until_next_round(session=session)
             continue
 
         session_id = f"{session.slug}:{rounds_completed + 1}"
@@ -749,6 +822,8 @@ async def _run_main_loop(
     max_rounds: int,
     reconnect_delay: float,
     execution_cutoff_seconds: float,
+    utc_hour_min: int = 0,
+    utc_hour_max: int = 24,
 ) -> None:
     output_path = build_output_path(
         output_dir=output_dir,
@@ -767,6 +842,8 @@ async def _run_main_loop(
         max_rounds=max_rounds,
         reconnect_delay=reconnect_delay,
         execution_cutoff_seconds=execution_cutoff_seconds,
+        utc_hour_min=utc_hour_min,
+        utc_hour_max=utc_hour_max,
     )
 
 
@@ -782,6 +859,8 @@ def main() -> int:
             max_rounds=int(args.max_rounds),
             reconnect_delay=float(args.reconnect_delay),
             execution_cutoff_seconds=float(args.execution_cutoff_seconds),
+            utc_hour_min=int(args.utc_hour_min),
+            utc_hour_max=int(args.utc_hour_max),
         ),
     )
     return 0

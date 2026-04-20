@@ -654,6 +654,181 @@ def live_edge_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]
     )
 
 
+def creative_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
+    """Novel strategy ideas — added 2026-04-17.
+
+    Eight strategies exploring untested regions of the entry-price / signal-mode space.
+    """
+    return (
+        # 1. Deep value entry at 65-70c.
+        #    Breakeven at ~37% win rate — huge margin vs the 87%+ needed at 95c.
+        #    Requires strong bid support ($15, bid ≥ 0.63) and 120s patience.
+        PolymarketCrypto5mStrategyPreset(
+            name="deep_value_65",
+            rationale="Enter the 65-70c band for maximum upside; low breakeven WR of ~37%.",
+            entry_price=0.65,
+            max_entry_price=0.70,
+            exit_price=0.93,
+            stop_loss_price=0.54,
+            min_seconds_before_close=20.0,
+            max_spread=0.012,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.63,
+            min_best_bid_size=15.0,
+            min_seconds_after_open=120.0,
+        ),
+        # 2. Flow imbalance in the 75-82c band.
+        #    Tests whether the bid/ask flow signal generalises below 90c.
+        #    Requires 15s of bid-heavy flow (imbalance ≥ 0.20) before entry.
+        PolymarketCrypto5mStrategyPreset(
+            name="flow_reversal_75",
+            rationale="Buy 75-82c only when sustained order-flow shows bid-side dominance.",
+            entry_price=0.75,
+            max_entry_price=0.82,
+            exit_price=0.97,
+            stop_loss_price=0.67,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.73,
+            min_best_bid_size=10.0,
+            mode="flow_imbalance",
+            min_seconds_after_open=90.0,
+            flow_window_seconds=15.0,
+            flow_min_samples=4,
+            flow_min_imbalance=0.20,
+        ),
+        # 3. Microprice signal at 75-82c.
+        #    Currently microprice is only used at 85c+. Tests whether the
+        #    weighted-mid signal adds value at lower prices too.
+        PolymarketCrypto5mStrategyPreset(
+            name="microprice_mid_75",
+            rationale="Microprice support applied to the 75-82c band — lower than current usage.",
+            entry_price=0.75,
+            max_entry_price=0.82,
+            exit_price=0.97,
+            stop_loss_price=0.67,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.73,
+            min_best_bid_size=0.0,
+            mode="microprice",
+            min_seconds_after_open=90.0,
+            min_total_top_size=15.0,
+            microprice_epsilon=0.002,
+        ),
+        # 4. Patience filter at 90c — wait 3 full minutes before firing.
+        #    A market still sitting at 90c+ with 2 minutes to close has survived
+        #    early mean-reversion pressure. Expected win rate boost through timing.
+        PolymarketCrypto5mStrategyPreset(
+            name="patience_long_90",
+            rationale="Wait 180s into the round; a 90c market at T+3min is highly committed.",
+            entry_price=0.90,
+            max_entry_price=0.96,
+            exit_price=0.99,
+            stop_loss_price=0.86,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=1.0,
+            min_supported_bid_price=0.89,
+            min_best_bid_size=5.0,
+            min_seconds_after_open=180.0,
+        ),
+        # 5. Quote stability gate at 85-91c.
+        #    Both bid AND ask must hold still for 5 seconds before entry.
+        #    A frozen quote at 85c means sellers are not pressing down — likely
+        #    to resolve upward rather than reverse.
+        PolymarketCrypto5mStrategyPreset(
+            name="stability_85",
+            rationale="Enter 85-91c only after 5s of frozen bid/ask — signals seller exhaustion.",
+            entry_price=0.85,
+            max_entry_price=0.91,
+            exit_price=0.98,
+            stop_loss_price=0.78,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.83,
+            min_best_bid_size=5.0,
+            mode="quote_stability",
+            min_seconds_after_open=90.0,
+            stability_seconds=5.0,
+        ),
+        # 6. Spread-switch sniper at 70-78c.
+        #    Ultra-tight spread (≤ 0.006) → accept any 70c+ entry.
+        #    Wider spread → floor rises to 0.74. Very tight spread at 70c
+        #    means strong two-sided commitment — market isn't going lower.
+        PolymarketCrypto5mStrategyPreset(
+            name="spread_sniper_70",
+            rationale="At 70c, ultra-tight spread signals high conviction; relax floor to 0.70.",
+            entry_price=0.74,
+            entry_price_tight=0.70,
+            spread_tight=0.006,
+            max_entry_price=0.78,
+            exit_price=0.96,
+            stop_loss_price=0.62,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.68,
+            min_best_bid_size=10.0,
+            mode="spread_switch",
+            min_seconds_after_open=90.0,
+        ),
+        # 7. Bid-dominance at 70-78c with a high support ratio.
+        #    Requires bid_size ≥ 2.0 × ask_size AND total book ≥ $20.
+        #    Aggressive buyers at 70c likely to push the market toward resolution.
+        PolymarketCrypto5mStrategyPreset(
+            name="support_deep_70",
+            rationale="Strong bid dominance (2x) in the 70-78c band signals accumulation.",
+            entry_price=0.70,
+            max_entry_price=0.78,
+            exit_price=0.96,
+            stop_loss_price=0.62,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.68,
+            min_best_bid_size=0.0,
+            mode="support_ratio",
+            min_seconds_after_open=90.0,
+            min_total_top_size=20.0,
+            support_ratio=2.0,
+        ),
+        # 8. Late momentum entry at 88-93c after 150s.
+        #    Combines timing patience with reference-price momentum check.
+        #    If BTC mid-price is still trending upward at 2.5 min in, and the
+        #    market is sitting at 88c, that's a convergent signal to buy.
+        PolymarketCrypto5mStrategyPreset(
+            name="late_momentum_88",
+            rationale="88-93c entry after 150s with upward BTC momentum — two converging signals.",
+            entry_price=0.88,
+            max_entry_price=0.93,
+            exit_price=0.98,
+            stop_loss_price=0.82,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=1.0,
+            min_supported_bid_price=0.86,
+            min_best_bid_size=5.0,
+            mode="binance_momentum",
+            min_seconds_after_open=150.0,
+            momentum_window_seconds=30.0,
+            momentum_min_samples=3,
+        ),
+    )
+
+
+def ninety_only_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
+    """Single-preset set for focused ninety_microprice_support edge research."""
+    return tuple(
+        preset
+        for preset in ninety_microstructure_strategy_presets()
+        if preset.name == "ninety_microprice_support"
+    )
+
+
 def all_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
     return (
         *entry_grid_strategy_presets(),
@@ -668,6 +843,7 @@ def research_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
         *ninety_microstructure_strategy_presets(),
         *profitability_candidate_strategy_presets(),
         *live_edge_strategy_presets(),
+        *creative_strategy_presets(),
     )
     unique: dict[str, PolymarketCrypto5mStrategyPreset] = {}
     for preset in presets:
