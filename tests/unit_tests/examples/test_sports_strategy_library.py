@@ -179,3 +179,15 @@ def test_empty_game_time_passes_with_gate():
         preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
         sport="tennis", market_type="moneyline", game_time="",
     )
+
+
+def test_time_gate_naive_iso_string_is_treated_as_utc():
+    """Gamma returns naive ISO strings (no Z, no +00:00) — gate must treat them as UTC."""
+    from datetime import UTC, datetime, timedelta
+    preset = _make_preset(max_hours_before_game=2.0)
+    # Naive ISO string 4 hours in the future — should block
+    future_naive = (datetime.now(tz=UTC) + timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%S")
+    assert not should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+        sport="tennis", market_type="moneyline", game_time=future_naive,
+    )

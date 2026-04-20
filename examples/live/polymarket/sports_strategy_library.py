@@ -2,12 +2,14 @@
 Price-arena strategy library for Polymarket sports markets (moneyline, spreads, totals).
 
 Defines which price arenas to trade and pure entry decision logic.
-Time-based gates (e.g. game-time proximity) are handled by the daemon.
+Preset-level time gate (``max_hours_before_game``) is evaluated here;
+the daemon handles the coarser pre-filter (already-started games).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,9 +196,10 @@ def should_enter_sports_market(
     # Time-to-game gate
     if preset.max_hours_before_game is not None and game_time:
         try:
-            from datetime import UTC, datetime
-            gt = datetime.fromisoformat(game_time.replace("Z", "+00:00"))
-            hours_until = (gt - datetime.now(tz=UTC)).total_seconds() / 3600
+            game_dt = datetime.fromisoformat(game_time.replace("Z", "+00:00"))
+            if game_dt.tzinfo is None:
+                game_dt = game_dt.replace(tzinfo=UTC)
+            hours_until = (game_dt - datetime.now(tz=UTC)).total_seconds() / 3600
             if hours_until > preset.max_hours_before_game:
                 return False
         except (ValueError, TypeError):
