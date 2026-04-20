@@ -281,6 +281,22 @@ def _build_instrument_id(market: SportsMarket) -> str:
     return f"{market.condition_id}-{market.token_id}.POLYMARKET"
 
 
+def _group_markets_by_game(markets: list[SportsMarket]) -> dict[str, list[str]]:
+    """
+    Group market instrument IDs by game (match_title + game_time).
+
+    Returns a dict mapping game_key → list of instrument_id strings for all
+    markets from that game. Used to populate family_instrument_ids so the
+    strategy can avoid taking opposing positions in the same game.
+    """
+    from collections import defaultdict
+    groups: dict[str, list[str]] = defaultdict(list)
+    for market in markets:
+        game_key = f"{market.match_title}|{market.game_time}"
+        groups[game_key].append(_build_instrument_id(market))
+    return dict(groups)
+
+
 async def run_daemon(
     *,
     preset_set: str,
@@ -565,6 +581,9 @@ async def _default_run_round(
                     http_client=http_client,
                 )
 
+    # Group markets by game for family position cap
+    game_groups = _group_markets_by_game(markets)
+
     instrument_ids: list[str] = []
     for market in markets:
         instrument_ids.append(_build_instrument_id(market))
@@ -580,6 +599,12 @@ async def _default_run_round(
 
     for market in markets:
         inst_id_str = _build_instrument_id(market)
+        game_key = f"{market.match_title}|{market.game_time}"
+        family_inst_ids = tuple(
+            InstrumentId.from_str(iid)
+            for iid in game_groups.get(game_key, [])
+            if iid != inst_id_str
+        )
         for preset in presets:
             strategy_key = f"{market.slug}:{preset.name}"
             strategy = SportsPaperStrategy(
@@ -592,6 +617,7 @@ async def _default_run_round(
                     market_type=market.market_type,
                     game_time=market.game_time,
                     vegas_implied=vegas_cache.get(f"{market.slug}:{market.outcome_name}"),
+                    family_instrument_ids=family_inst_ids,
                 ),
             )
             node.trader.add_strategy(strategy)
