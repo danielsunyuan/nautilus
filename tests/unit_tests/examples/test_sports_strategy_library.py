@@ -353,3 +353,17 @@ def test_preset_kelly_defaults_none():
     assert preset.kelly_edge_estimate is None
     # kelly_max_fraction default is 0.25
     assert preset.kelly_max_fraction == 0.25
+
+
+def test_kelly_sizing_end_to_end():
+    """kelly_stake_usd + shares conversion mirrors _compute_order_quantity Kelly branch."""
+    # edge=0.12, entry=0.65, order_qty=10 → bankroll=1000 → kelly_usd=250 → shares=250/0.65≈384.6
+    kelly_usd = lib.kelly_stake_usd(edge=0.12, entry_price=0.65, bankroll_usd=1000.0)
+    assert abs(kelly_usd - 250.0) < 0.01
+    shares = kelly_usd / 0.65
+    assert abs(shares - 384.62) < 0.1
+
+
+def test_kelly_sizing_zero_edge_returns_zero():
+    """kelly_stake_usd returns 0 for zero edge — _compute_order_quantity should refuse order."""
+    assert lib.kelly_stake_usd(edge=0.0, entry_price=0.65, bankroll_usd=1000.0) == 0.0

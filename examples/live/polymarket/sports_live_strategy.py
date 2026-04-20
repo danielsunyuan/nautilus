@@ -132,6 +132,7 @@ class SportsPaperStrategy(Strategy):
         # Kelly sizing: if preset has kelly_edge_estimate, use Kelly formula for target USD
         preset = self.config.preset
         if preset.kelly_edge_estimate is not None:
+            # Heuristic: order_qty (default 10) × 100 = $1000 notional bankroll for paper trading
             bankroll_usd = float(self.config.order_qty) * 100.0
             kelly_usd = kelly_stake_usd(
                 edge=preset.kelly_edge_estimate,
