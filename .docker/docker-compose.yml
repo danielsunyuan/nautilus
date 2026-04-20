@@ -439,6 +439,49 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  sports-focused-vpn:
+    container_name: nautilus-sports-focused-vpn
+    profiles: ["vpn"]
+    image: nautilus-papertrade:latest
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/polymarket/polymarket_sports_paper_daemon.py
+      - --preset-set
+      - focused
+      - --max-rounds
+      - "0"
+      - --output-dir
+      - /workspace/outputs
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+      - ../.env.polymarket
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_VPN_CACHE_HOST:-172.22.0.3}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
+      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
+      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
+    volumes:
+      - ..:/workspace
+      - ../outputs:/workspace/outputs
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
   sports-settlement-vpn:
     container_name: nautilus-sports-settlement-vpn
     profiles: ["vpn"]
