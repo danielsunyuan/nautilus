@@ -20,6 +20,8 @@ class SportsStrategyPreset:
     min_ask_size: float = 50.0     # require decent liquidity
     order_qty: float = 10.0
     mode: str = "band_only"        # "band_only" or "basic"
+    allowed_sports: frozenset[str] | None = None        # None = all sports
+    allowed_market_types: frozenset[str] | None = None  # None = all market types
 
 
 def band_only_presets() -> tuple[SportsStrategyPreset, ...]:
@@ -116,9 +118,13 @@ def should_enter_sports_market(
     ask: float,
     bid_size: float,
     ask_size: float,
+    sport: str = "",
+    market_type: str = "",
 ) -> bool:
     """
     Pure entry decision function.
+
+    Checks sport and market type whitelists first, then price band.
 
     For "band_only" mode:
       - ask must be >= preset.min_ask and < preset.max_ask
@@ -129,6 +135,13 @@ def should_enter_sports_market(
       - spread (ask - bid) must be <= preset.max_spread
       - ask_size must be >= preset.min_ask_size
     """
+    # Sport whitelist
+    if preset.allowed_sports is not None and sport not in preset.allowed_sports:
+        return False
+    # Market type whitelist
+    if preset.allowed_market_types is not None and market_type not in preset.allowed_market_types:
+        return False
+
     # --- basic gates ---
     if ask < preset.min_ask:
         return False
@@ -139,7 +152,8 @@ def should_enter_sports_market(
     if preset.mode == "band_only":
         return True
 
-    if (ask - bid) > preset.max_spread:
+    # Use small epsilon for floating point comparison
+    if (ask - bid) > (preset.max_spread + 1e-9):
         return False
     if ask_size < preset.min_ask_size:
         return False
