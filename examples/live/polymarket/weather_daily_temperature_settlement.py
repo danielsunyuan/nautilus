@@ -10,8 +10,12 @@
 """
 Settlement polling resolver for Polymarket weather daily temperature markets.
 
-Pure orchestration — reads JSONL files and queries Gamma API for market
-resolution status.  No Nautilus TradingNode, no Strategy classes.
+Pure orchestration — reads JSONL files and queries CLOB API midpoint data for
+market resolution status. No Nautilus TradingNode, no Strategy classes.
+
+When a market resolves, the winning token's mid price snaps to ~1.000 and the
+losing token's mid price snaps to ~0.000. This is authoritative and directly
+accessible from the CLOB API.
 """
 
 from __future__ import annotations
@@ -60,6 +64,7 @@ except ModuleNotFoundError:
 log = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_DIR = "/workspace/outputs"
+RESOLVED_THRESHOLD = 0.99
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +76,7 @@ class UnresolvedEntry:
     """An unresolved strategy_result entry extracted from JSONL."""
     market_slug: str
     condition_id: str
+    token_id: str
     strategy_name: str
     arena: str
     token_side: str  # "yes" or "no"
@@ -84,13 +90,10 @@ class UnresolvedEntry:
 
 @dataclass(frozen=True, slots=True)
 class MarketResolution:
-    """Resolution data for a market from Gamma API."""
-    condition_id: str
-    slug: str
+    """Resolution data for a token from CLOB midpoint."""
+    token_id: str
     resolved: bool
-    winning_outcome: str | None  # "Yes" or "No" or None if not resolved
-    resolution_price_yes: float | None  # 1.0 or 0.0
-    resolution_price_no: float | None   # 0.0 or 1.0
+    settlement_price: float | None  # 1.0 = token wins, 0.0 = token loses, None = still live
 
 
 # ---------------------------------------------------------------------------
@@ -135,21 +138,30 @@ def _read_all_jsonl_rows(jsonl_dir: Path) -> list[tuple[str, dict]]:
     return results
 
 
-def _collect_settled_condition_ids(all_rows: list[tuple[str, dict]]) -> set[str]:
-    """Collect condition_ids that already have a settlement_update event."""
+def _collect_settled_token_ids(all_rows: list[tuple[str, dict]]) -> set[str]:
+    """Collect token_ids that already have a settlement_update event.
+
+    Also checks condition_id for backward compatibility with old settlement events.
+    """
     settled: set[str] = set()
     for _fname, row in all_rows:
         if row.get("event") == "settlement_update" and row.get("resolved") is True:
-            cid = row.get("condition_id")
-            if cid:
-                settled.add(cid)
+            # Prefer token_id (new format)
+            token_id = row.get("token_id")
+            if token_id:
+                settled.add(token_id)
+            # Fallback to condition_id (old format)
+            else:
+                cid = row.get("condition_id")
+                if cid:
+                    settled.add(cid)
     return settled
 
 
 def scan_unresolved_entries(jsonl_dir: Path) -> list[UnresolvedEntry]:
     """Scan all JSONL files in directory for unresolved strategy_result rows."""
     all_rows = _read_all_jsonl_rows(jsonl_dir)
-    settled = _collect_settled_condition_ids(all_rows)
+    settled = _collect_settled_token_ids(all_rows)
 
     entries: list[UnresolvedEntry] = []
     for fname, row in all_rows:
@@ -159,6 +171,8 @@ def scan_unresolved_entries(jsonl_dir: Path) -> list[UnresolvedEntry]:
             continue
         if row.get("accounting_status") != "open":
             continue
+
+        # Extract condition_id from condition_id field or instrument_id
         condition_id = row.get("condition_id", "")
         if not condition_id:
             instrument_id = row.get("instrument_id", "")
@@ -166,12 +180,25 @@ def scan_unresolved_entries(jsonl_dir: Path) -> list[UnresolvedEntry]:
                 condition_id = instrument_id.split(".POLYMARKET")[0].rsplit("-", 1)[0]
         if not condition_id:
             continue
-        if condition_id in settled:
+
+        # Extract token_id from instrument_id
+        token_id = ""
+        instrument_id = row.get("instrument_id", "")
+        if instrument_id:
+            token_id = instrument_id.split(".POLYMARKET")[0].rsplit("-", 1)[1]
+
+        if not token_id:
             continue
+
+        # Skip if already settled
+        if token_id in settled:
+            continue
+
         entries.append(
             UnresolvedEntry(
                 market_slug=row.get("market_slug", ""),
                 condition_id=condition_id,
+                token_id=token_id,
                 strategy_name=row.get("strategy_name", ""),
                 arena=row.get("arena", ""),
                 token_side=row.get("token_side", "yes"),
@@ -200,18 +227,11 @@ def compute_settlement(
     """
     if not resolution.resolved:
         return None
-    if resolution.winning_outcome is None:
+    if resolution.settlement_price is None:
         return None
 
-    # Determine settlement price for the token side we hold
-    if entry.token_side == "yes":
-        settlement_price = resolution.resolution_price_yes
-    else:
-        settlement_price = resolution.resolution_price_no
-
-    if settlement_price is None:
-        return None
-
+    # settlement_price is already the correct payout for our token
+    settlement_price = resolution.settlement_price
     pnl = (settlement_price - entry.entry_price) * entry.shares
 
     if pnl > 0:
@@ -224,6 +244,7 @@ def compute_settlement(
         "event": "settlement_update",
         "market_slug": entry.market_slug,
         "condition_id": entry.condition_id,
+        "token_id": entry.token_id,
         "strategy_name": entry.strategy_name,
         "arena": entry.arena,
         "city": entry.city,
@@ -240,97 +261,76 @@ def compute_settlement(
 
 
 # ---------------------------------------------------------------------------
-# Gamma API fetch
+# CLOB API fetch
 # ---------------------------------------------------------------------------
 
-async def fetch_market_resolution(
+def _resolution_from_price(token_id: str, price: float) -> MarketResolution:
+    """Convert a scalar price to a MarketResolution."""
+    if price >= RESOLVED_THRESHOLD:
+        return MarketResolution(token_id=token_id, resolved=True, settlement_price=1.0)
+    elif price <= (1.0 - RESOLVED_THRESHOLD):
+        return MarketResolution(token_id=token_id, resolved=True, settlement_price=0.0)
+    else:
+        return MarketResolution(token_id=token_id, resolved=False, settlement_price=None)
+
+
+async def fetch_token_resolution(
     *,
-    condition_id: str,
+    token_id: str,
     http_client: Any,
-    gamma_base_url: str,
+    clob_base_url: str,
     timeout: float = 15.0,
 ) -> MarketResolution | None:
-    """Query Gamma API for a market's resolution status."""
+    """Query CLOB for a token's resolution status.
+
+    Two-phase lookup:
+    1. GET /midpoint  — works for active (open) markets. Winning token mid
+       snaps to ~1.000 and losing token mid snaps to ~0.000 near resolution.
+    2. GET /last-trade-price  — fallback for closed/settled markets whose
+       orderbook has been removed (midpoint returns 404). The last trade
+       price reflects the final settlement direction.
+    """
+    # Phase 1: midpoint (active markets)
     try:
         response = await http_client.get(
-            f"{gamma_base_url}/markets",
-            params={"condition_id": condition_id},
+            f"{clob_base_url}/midpoint",
+            params={"token_id": token_id},
             timeout=timeout,
         )
-        response.raise_for_status()
-        data = response.json()
+        if response.status_code == 200:
+            mid_str = response.json().get("mid")
+            if mid_str is not None:
+                return _resolution_from_price(token_id, float(mid_str))
+        elif response.status_code != 404:
+            log.warning(
+                "Unexpected midpoint status %d for token_id=...%s",
+                response.status_code, token_id[-8:],
+            )
+            return None
+        # 404 → market closed; fall through to last-trade-price
     except Exception:
-        log.warning("Failed to fetch resolution for condition_id=%s", condition_id)
+        log.warning("Failed to fetch midpoint for token_id=...%s", token_id[-8:])
         return None
 
-    # API returns a list; find our market
-    markets = data if isinstance(data, list) else [data]
-    if not markets:
-        return None
-
-    market = markets[0]
-
-    slug = market.get("slug", "")
-    closed = market.get("closed", False)
-    resolved = market.get("resolved", False)
-
-    if not closed or not resolved:
-        return MarketResolution(
-            condition_id=condition_id,
-            slug=slug,
-            resolved=False,
-            winning_outcome=None,
-            resolution_price_yes=None,
-            resolution_price_no=None,
+    # Phase 2: last-trade-price (closed/resolved markets)
+    try:
+        response = await http_client.get(
+            f"{clob_base_url}/last-trade-price",
+            params={"token_id": token_id},
+            timeout=timeout,
         )
-
-    # Determine winning outcome from tokens or outcome_prices
-    winning_outcome: str | None = None
-    resolution_price_yes: float | None = None
-    resolution_price_no: float | None = None
-
-    # Try tokens array first
-    tokens = market.get("tokens", [])
-    for tok in tokens:
-        outcome = (tok.get("outcome") or "").strip()
-        winner = tok.get("winner", False)
-        price = tok.get("price")
-        if winner or (price is not None and str(price) == "1"):
-            winning_outcome = outcome
-
-    # Try outcome_prices field as fallback
-    if winning_outcome is None:
-        outcome_prices_str = market.get("outcome_prices", "")
-        if outcome_prices_str:
-            try:
-                parts = [float(p.strip()) for p in outcome_prices_str.split(",")]
-                if len(parts) == 2:
-                    if parts[0] == 1.0 and parts[1] == 0.0:
-                        winning_outcome = "Yes"
-                    elif parts[0] == 0.0 and parts[1] == 1.0:
-                        winning_outcome = "No"
-            except (ValueError, AttributeError):
-                pass
-
-    if winning_outcome is None:
-        # Cannot determine resolution clearly — be conservative
+        if response.status_code == 200:
+            price_str = response.json().get("price")
+            if price_str is not None:
+                return _resolution_from_price(token_id, float(price_str))
+        log.warning(
+            "last-trade-price status %d for token_id=...%s",
+            response.status_code, token_id[-8:],
+        )
         return None
-
-    if winning_outcome.lower() == "yes":
-        resolution_price_yes = 1.0
-        resolution_price_no = 0.0
-    else:
-        resolution_price_yes = 0.0
-        resolution_price_no = 1.0
-
-    return MarketResolution(
-        condition_id=condition_id,
-        slug=slug,
-        resolved=True,
-        winning_outcome=winning_outcome,
-        resolution_price_yes=resolution_price_yes,
-        resolution_price_no=resolution_price_no,
-    )
+    except Exception:
+        log.warning("Failed to fetch last-trade-price for token_id=...%s", token_id[-8:])
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -360,15 +360,15 @@ async def run_settlement_loop(
             log.info("No unresolved entries found. Exiting.")
             return
 
-        # Deduplicate by condition_id (take first entry per condition_id)
-        seen_cids: dict[str, list[UnresolvedEntry]] = {}
+        # Deduplicate by token_id (take first entry per token_id)
+        seen_tokens: dict[str, list[UnresolvedEntry]] = {}
         for entry in entries:
-            seen_cids.setdefault(entry.condition_id, []).append(entry)
+            seen_tokens.setdefault(entry.token_id, []).append(entry)
 
         settlements_written = 0
 
-        for condition_id, group in seen_cids.items():
-            resolution = await fetch_resolution(condition_id=condition_id)
+        for token_id, group in seen_tokens.items():
+            resolution = await fetch_resolution(token_id=token_id)
             if resolution is None:
                 continue
 
@@ -382,7 +382,7 @@ async def run_settlement_loop(
                 log.info(
                     "Settled %s (%s): pnl=%.4f outcome=%s",
                     entry.market_slug,
-                    entry.condition_id,
+                    entry.token_id[-8:],
                     event["pnl"],
                     event["resolved_outcome"],
                 )
@@ -439,7 +439,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-interval", type=float, default=900.0, help="seconds between polls (default 15 min)")
     parser.add_argument("--max-iterations", type=int, default=0, help="0 = poll forever")
     parser.add_argument("--report-md", default="", help="path to refresh markdown report after settlements")
-    parser.add_argument("--gamma-host", default="https://gamma-api.polymarket.com")
+    parser.add_argument("--clob-host", default="https://clob.polymarket.com", help="CLOB API base URL")
     return parser
 
 
@@ -453,11 +453,11 @@ async def _async_main(args: argparse.Namespace) -> None:
     writer = JsonlRunWriter(jsonl_dir / "settlement.jsonl")
 
     async with httpx.AsyncClient() as client:
-        async def _fetch(*, condition_id: str) -> MarketResolution | None:
-            return await fetch_market_resolution(
-                condition_id=condition_id,
+        async def _fetch(*, token_id: str) -> MarketResolution | None:
+            return await fetch_token_resolution(
+                token_id=token_id,
                 http_client=client,
-                gamma_base_url=args.gamma_host,
+                clob_base_url=args.clob_host,
             )
 
         await run_settlement_loop(

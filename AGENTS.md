@@ -28,6 +28,16 @@ This repository is worked from a Dockerized development environment.
 - Keep one stable `TraderId` per algo so Redis keys and streams stay partitioned across concurrent papertrade runs, and keep `use_instance_id=True` so each run gets a fresh namespace instead of reloading stale sandbox state.
 - Credentials remain in local `.env*` files and are injected into the workspace container through Compose; never print secret values.
 
+## CLOB vs Gamma — always prefer CLOB
+
+CLOB (`clob.polymarket.com`) is the authoritative, real-time source. Gamma (`gamma-api.polymarket.com`) is a delayed, cached read layer.
+
+- **Prices and resolution**: CLOB only. Use `GET /midpoint?token_id=TOKEN_ID`. A resolved binary market's winning token snaps to mid ≥ 0.99; losing token to ≤ 0.01.
+- **Market discovery** (open markets, slugs, rulesets): Gamma is acceptable — this is metadata, not price data.
+- **Never use Gamma** for `condition_id`-based resolution lookups — its `?condition_id=` endpoint is known to return wrong/unrelated markets.
+
+Both are IP-blocked on the WSL2 host. All requests must run inside a VPN-connected container.
+
 ## CRITICAL: Polymarket resolution mechanism
 
 **Any decision involving a Polymarket position — entry, exit, hold, P&L assessment — must account for how that market resolves.**

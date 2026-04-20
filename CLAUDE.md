@@ -129,6 +129,22 @@ SandboxExecutionClientConfig(
 
 **DO NOT** use the default `MakerTakerFeeModel` for Polymarket — it applies a flat % to notional and overcharges by ~34x at high prices (90c+).
 
+## CLOB vs Gamma — Always Prefer CLOB
+
+**CLOB (`clob.polymarket.com`) is the authoritative, real-time source. Gamma (`gamma-api.polymarket.com`) is a delayed, cached read layer on top of CLOB.**
+
+| Use case | Use |
+|---|---|
+| Current bid/ask, mid-price | CLOB `/midpoint`, `/book` |
+| Market resolution (resolved?) | CLOB `/midpoint` — winning token snaps to ≥0.99, losing to ≤0.01 |
+| Order submission | CLOB `/order` |
+| Market discovery (open markets, slugs, rulesets) | Gamma `/markets` — acceptable since this is metadata, not price data |
+| Settlement status | CLOB only — Gamma's `condition_id` lookup returns stale/wrong markets |
+
+**Do not use Gamma for anything price- or resolution-related.** Gamma's `/markets?condition_id=` endpoint is known to return incorrect markets. All settlement and price checks must go through CLOB.
+
+Both CLOB and Gamma are IP-blocked on the WSL2 host — all requests must run inside a VPN-connected container.
+
 ## Key Conventions
 
 - **Paper only** — weather daemon uses `SandboxExecutionClientConfig`. Never `PolymarketLiveExecClientFactory`.
