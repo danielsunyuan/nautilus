@@ -58,6 +58,11 @@ services:
       timeout: 10s
       retries: 8
       start_period: 20s
+    # Port 8080 is published here because all services using network_mode: service:nordvpn
+    # share this container's network namespace. The exit server binds to 8080 inside
+    # that namespace, making it reachable via: docker exec nautilus-nordvpn wget -qO- http://127.0.0.1:8080/positions
+    ports:
+      - "8080:8080"
     networks:
       - nautilus-network
     restart: unless-stopped
@@ -481,8 +486,8 @@ services:
       - "900"
       - --report-md
       - /workspace/WEATHER_DAILY_TEMPERATURE_RESULTS.md
-      - --gamma-host
-      - https://gamma-api.polymarket.com
+      - --clob-host
+      - https://clob.polymarket.com
     init: true
     tty: true
     stdin_open: true
@@ -563,6 +568,263 @@ services:
       - "${SENTINEL_POLL_INTERVAL:-300}"
       - --min-relevance
       - "${SENTINEL_MIN_RELEVANCE:-0.25}"
+
+  # ---------------------------------------------------------------------------
+  # Recorder services (lightweight pip-installed nautilus_trader image)
+  # Migrated from polynautilus/ — data recording and live signal watching.
+  # ---------------------------------------------------------------------------
+
+  recorder-5m-vpn:
+    container_name: nautilus-recorder-5m-vpn
+    profiles: ["vpn", "monitor"]
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile.recorder
+    image: nautilus-recorder:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - path: ../.env.polymarket
+        required: false
+    environment:
+      POLYMARKET_5M_ASSETS: "${POLYMARKET_5M_ASSETS:-BTC,ETH,SOL,XRP,DOGE,BNB,HYPE}"
+      POLYMARKET_5M_FLUSH_ROWS: "${POLYMARKET_5M_FLUSH_ROWS:-20000}"
+      POLYMARKET_5M_FLUSH_SECONDS: "${POLYMARKET_5M_FLUSH_SECONDS:-300}"
+      POLYMARKET_NAUTILUS_MAX_ROWS_PER_GROUP: "${POLYMARKET_NAUTILUS_MAX_ROWS_PER_GROUP:-20000}"
+    volumes:
+      - ${POLYMARKET_NAUTILUS_CATALOG_HOST_PATH:-/mnt/d/atlas/quant-polymarket-nautilus/nautilus_catalog}:/data/nautilus_catalog
+      - ${POLYMARKET_NAUTILUS_EXPORT_HOST_PATH:-/mnt/d/atlas/quant-polymarket-nautilus/nautilus_export}:/data/nautilus_export
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    command: ["python", "-m", "scripts.polymarket_crypto_5m_nautilus_record"]
+
+  recorder-multi-tf-vpn:
+    container_name: nautilus-recorder-multi-tf-vpn
+    profiles: ["vpn", "monitor"]
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile.recorder
+    image: nautilus-recorder:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POLYMARKET_MULTI_TF_ASSETS: "${POLYMARKET_MULTI_TF_ASSETS:-BTC,ETH,SOL,XRP,DOGE,BNB,HYPE}"
+      POLYMARKET_MULTI_TF_TIMEFRAMES: "${POLYMARKET_MULTI_TF_TIMEFRAMES:-15m,1h}"
+      POLYMARKET_MULTI_TF_POLL_15M: "${POLYMARKET_MULTI_TF_POLL_15M:-10}"
+      POLYMARKET_MULTI_TF_POLL_1H: "${POLYMARKET_MULTI_TF_POLL_1H:-30}"
+      POLYMARKET_MULTI_TF_OUTPUT: "/data/nautilus_export/multi_tf"
+    volumes:
+      - ${POLYMARKET_NAUTILUS_EXPORT_HOST_PATH:-/mnt/d/atlas/quant-polymarket-nautilus/nautilus_export}:/data/nautilus_export
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    command: ["python", "-m", "scripts.polymarket_crypto_multi_tf_recorder"]
+
+  signal-watcher-5m-vpn:
+    container_name: nautilus-signal-watcher-5m-vpn
+    profiles: ["vpn", "monitor"]
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile.recorder
+    image: nautilus-recorder:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POLYMARKET_5M_ASSETS: "${POLYMARKET_5M_ASSETS:-BTC,ETH,SOL,XRP,DOGE,BNB,HYPE}"
+      PM_LIVE_SIGNAL_PATH: "${PM_LIVE_SIGNAL_PATH:-/data/nautilus_export/live_signals/polymarket_5m_live_signals.jsonl}"
+      PM_LIVE_SIGNAL_WINDOW_SECONDS: "${PM_LIVE_SIGNAL_WINDOW_SECONDS:-10}"
+      PM_LIVE_SIGNAL_MID_THRESHOLD: "${PM_LIVE_SIGNAL_MID_THRESHOLD:-0.99}"
+      PM_LIVE_SIGNAL_SPREAD_THRESHOLD: "${PM_LIVE_SIGNAL_SPREAD_THRESHOLD:-0.50}"
+      PM_LIVE_SIGNAL_UPDATES_PER_S: "${PM_LIVE_SIGNAL_UPDATES_PER_S:-10}"
+      PM_LIVE_SIGNAL_COOLDOWN_SECONDS: "${PM_LIVE_SIGNAL_COOLDOWN_SECONDS:-2}"
+    volumes:
+      - ${POLYMARKET_NAUTILUS_EXPORT_HOST_PATH:-/mnt/d/atlas/quant-polymarket-nautilus/nautilus_export}:/data/nautilus_export
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    command: ["python", "-m", "scripts.polymarket_crypto_5m_live_signal_watcher"]
+
+  # ---------------------------------------------------------------------------
+  # Weather live daemon — uses pip-installed nautilus_trader with repo mounted
+  # as a volume. Uses the recorder image (lighter than the Rust/Cython build).
+  # ---------------------------------------------------------------------------
+
+  weather-live-daemon-vpn:
+    container_name: nautilus-weather-live-daemon-vpn
+    profiles: ["vpn", "execution"]
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile.recorder
+    image: nautilus-recorder:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    working_dir: /workspace/nautilus
+    env_file:
+      - path: ../.env.polymarket
+        required: false
+    environment:
+      PYTHONPATH: "/app:/workspace/nautilus"
+      POLYMARKET_REQUIRE_UNBLOCKED: "${POLYMARKET_REQUIRE_UNBLOCKED:-1}"
+      POLYMARKET_EXPECT_COUNTRY: "${POLYMARKET_EXPECT_COUNTRY:-JP}"
+      NAUTILUS_CACHE_HOST: "${NAUTILUS_VPN_CACHE_HOST:-172.22.0.3}"
+      NAUTILUS_CACHE_PORT: "${NAUTILUS_CACHE_PORT:-6379}"
+    volumes:
+      - ..:/workspace/nautilus
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    command:
+      - python
+      - /workspace/nautilus/examples/live/polymarket/polymarket_weather_daily_temperature_live_daemon.py
+      - --preset-set
+      - live_90_basic
+      - --output-dir
+      - /workspace/nautilus/outputs
+      - --capital-budget
+      - "50"
+
+  # ---------------------------------------------------------------------------
+  # Exit server — exposes HTTP on port 8080 inside nordvpn network namespace.
+  # Use: docker exec nautilus-nordvpn wget -qO- http://127.0.0.1:8080/positions
+  # ---------------------------------------------------------------------------
+
+  weather-exit-server-vpn:
+    container_name: nautilus-weather-exit-server
+    profiles: ["vpn", "execution"]
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile.recorder
+    image: nautilus-recorder:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    working_dir: /workspace/nautilus
+    env_file:
+      - path: ../.env.polymarket
+        required: false
+    environment:
+      PYTHONPATH: "/app:/workspace/nautilus"
+      POLYMARKET_REQUIRE_UNBLOCKED: "${POLYMARKET_REQUIRE_UNBLOCKED:-1}"
+      POLYMARKET_EXPECT_COUNTRY: "${POLYMARKET_EXPECT_COUNTRY:-JP}"
+      EXIT_SERVER_OUTPUT_DIR: "/workspace/nautilus/outputs"
+      EXIT_SERVER_PORT: "8080"
+    volumes:
+      - ..:/workspace/nautilus
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    command:
+      - python
+      - /workspace/nautilus/examples/live/polymarket/weather_temperature_exit_server.py
+
+  # ---------------------------------------------------------------------------
+  # Utility profiles — geoblock check, balance monitor, execution preflight
+  # Migrated from quant/ repo. Run one-shot with --profile and --rm.
+  # ---------------------------------------------------------------------------
+
+  geoblock-check:
+    container_name: nautilus-geoblock-check
+    profiles: ["readonly"]
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile.recorder
+    image: nautilus-recorder:latest
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    command: ["python", "-m", "scripts.polymarket_geoblock_check", "--json"]
+
+  balance-monitor:
+    container_name: nautilus-balance-monitor
+    profiles: ["monitor"]
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile.recorder
+    image: nautilus-recorder:latest
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - path: ../.env.polymarket
+        required: false
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    command: ["python", "-m", "scripts.polymarket_balance", "--positions"]
+
+  execution-check:
+    container_name: nautilus-execution-check
+    profiles: ["execution"]
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile.recorder
+    image: nautilus-recorder:latest
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - path: ../.env.polymarket
+        required: false
+    environment:
+      POLYMARKET_REQUIRE_UNBLOCKED: "${POLYMARKET_REQUIRE_UNBLOCKED:-1}"
+      POLYMARKET_EXPECT_COUNTRY: "${POLYMARKET_EXPECT_COUNTRY:-JP}"
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    command: ["python", "-m", "scripts.smoke_test_accounts", "--venues", "polymarket"]
 
   postgres:
     container_name: nautilus-database
