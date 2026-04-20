@@ -182,17 +182,36 @@ Both CLOB and Gamma are IP-blocked on the WSL2 host — all requests must run in
 
 ### Services (docker-compose.yml)
 
+Two images are used:
+- **`nautilus-papertrade:latest`** — full Rust/Cython build (~20 min); used for NautilusTrader TradingNode services.
+- **`nautilus-recorder:latest`** — lightweight pip-installed `nautilus_trader`; used for recorders, signal watchers, exit server. Rebuilds in seconds.
+
 | Service | Container | Image | Purpose |
 |---------|-----------|-------|---------|
-| `papertrade-daemon-vpn` | `nautilus-papertrade-daemon-vpn` | `nautilus-papertrade:latest` | Live 5m BTC paper daemon via NordVPN |
-| `sports-daemon-vpn` | `nautilus-sports-daemon-vpn` | `nautilus-papertrade:latest` | Live sports paper daemon via NordVPN |
-| `sports-settlement-vpn` | `nautilus-sports-settlement-vpn` | `nautilus-papertrade:latest` | Sports settlement poller (900s interval) |
+| `nordvpn` | `nautilus-nordvpn` | `nautilus-nordvpn` | VPN sidecar; publishes port 8080 for exit server |
+| `papertrade-daemon-vpn` | `nautilus-papertrade-daemon-vpn` | `nautilus-papertrade:latest` | 5m BTC paper daemon via NordVPN |
+| `weather-daemon-vpn` | `nautilus-weather-daemon-vpn` | `nautilus-papertrade:latest` | Weather paper daemon via NordVPN |
+| `weather-live-daemon-vpn` | `nautilus-weather-live-daemon-vpn` | `nautilus-recorder:latest` | Weather live daemon (90c, $50 budget) |
+| `weather-exit-server-vpn` | `nautilus-weather-exit-server` | `nautilus-recorder:latest` | Manual exit HTTP server (port 8080) |
+| `weather-settlement-vpn` | `nautilus-weather-settlement-vpn` | `nautilus-papertrade:latest` | Weather settlement poller (CLOB, 900s) |
+| `sports-daemon-vpn` | `nautilus-sports-daemon-vpn` | `nautilus-papertrade:latest` | Sports paper daemon via NordVPN |
+| `sports-settlement-vpn` | `nautilus-sports-settlement-vpn` | `nautilus-papertrade:latest` | Sports settlement poller (900s) |
 | `sports-results-reporter` | `nautilus-sports-results-reporter` | `nautilus-papertrade:latest` | Sports JSONL→SPORTS_RESULTS.md (60s) |
-| `nordvpn` | `nautilus-nordvpn` | `nautilus-nordvpn` | VPN sidecar (Tokyo, NORDLYNX) |
+| `crypto-results-reporter` | `nautilus-crypto-results-reporter` | `nautilus-papertrade:latest` | BTC JSONL→Markdown reports |
+| `recorder-5m-vpn` | `nautilus-recorder-5m-vpn` | `nautilus-recorder:latest` | CLOB 5m order book recorder → Parquet |
+| `recorder-multi-tf-vpn` | `nautilus-recorder-multi-tf-vpn` | `nautilus-recorder:latest` | 15m/1h poll recorder → JSONL |
+| `signal-watcher-5m-vpn` | `nautilus-signal-watcher-5m-vpn` | `nautilus-recorder:latest` | Live 5m signal watcher → JSONL |
 | `redis` | `nautilus-redis` | `redis:7.2-alpine` | Nautilus cache backend |
 | `postgres` | `nautilus-database` | `postgres` | Persistent storage |
 | `workspace` | `nautilus-workspace` | `nautilus-workspace` | Dev shell (uv, pytest) |
-| `crypto-results-reporter` | `nautilus-crypto-results-reporter` | `nautilus-papertrade:latest` | BTC JSONL→Markdown reports |
+
+**One-shot utility profiles** (run with `--rm`):
+
+| Service | Profile | Purpose |
+|---------|---------|---------|
+| `geoblock-check` | `readonly` | Verify VPN is not geo-blocked |
+| `balance-monitor` | `monitor` | Show Polymarket wallet balances |
+| `execution-check` | `execution` | Geoblock preflight + smoke test |
 
 ### Rebuild Process
 
@@ -235,22 +254,22 @@ docker compose -f .docker/docker-compose.yml build papertrade-daemon-vpn
 `clob.polymarket.com` and `gamma-api.polymarket.com` are **IP-blocked on the host machine** (WSL2). All requests return Azure CDN 404s. Any task that needs live bid/ask prices, order book data, market resolution, or order submission must run inside a VPN-connected container:
 
 ```bash
-# Query Gamma or CLOB from inside the live daemon container (has VPN)
-docker exec polynautilus-polymarket-weather-live-vpn-1 python3 -c "
+# Query Gamma or CLOB from inside any VPN-connected container
+docker exec nautilus-weather-live-daemon-vpn python3 -c "
 import httpx
 r = httpx.get('https://gamma-api.polymarket.com/markets?condition_id=0xABC...')
 print(r.json())
 "
 
-# Or use the settlement container (also VPN-connected)
+# Or use the settlement container
 docker exec nautilus-weather-settlement-vpn python3 -c "
 import httpx
-r = httpx.get('https://clob.polymarket.com/book?token_id=TOKEN_ID')
+r = httpx.get('https://clob.polymarket.com/midpoint?token_id=TOKEN_ID')
 print(r.json())
 "
 ```
 
-Both containers route traffic through the NordVPN sidecar and have unrestricted Polymarket API access.
+All VPN-connected containers route traffic through `nautilus-nordvpn` and have unrestricted Polymarket API access.
 
 ## Manual Position Exit
 
@@ -267,9 +286,9 @@ docker exec nautilus-weather-exit-server \
     python3 /workspace/nautilus/examples/live/polymarket/weather_temperature_exit.py \
     --market-slug "highest-temperature-in-austin-on-april-20-2026-69forbelow"
 
-# Or via the HTTP server (accessible within VPN network namespace only — NOT from host)
-docker exec polynautilus-nordvpn-1 wget -qO- http://127.0.0.1:8080/positions
-docker exec polynautilus-nordvpn-1 wget -qO- --post-data='{"market_slug":"..."}' \
+# Or via the HTTP server inside the nautilus nordvpn network namespace
+docker exec nautilus-nordvpn wget -qO- http://127.0.0.1:8080/positions
+docker exec nautilus-nordvpn wget -qO- --post-data='{"market_slug":"..."}' \
     --header='Content-Type: application/json' http://127.0.0.1:8080/exit
 ```
 
