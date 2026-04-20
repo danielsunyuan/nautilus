@@ -103,7 +103,6 @@ claude.config.json
 .continue/
 .worktrees/
 
-CLAUDE.md
 CODEX.md
 GEMINI.md
 
