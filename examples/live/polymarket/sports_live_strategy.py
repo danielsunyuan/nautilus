@@ -37,6 +37,7 @@ class SportsPaperStrategyConfig(StrategyConfig, frozen=True):
     sport: str = ""
     market_type: str = ""
     game_time: str = ""
+    vegas_implied: float | None = None
     family_instrument_ids: tuple[InstrumentId, ...] = ()
     target_usd_per_market: Decimal | None = None
     min_order_size_shares: Decimal = Decimal("0")
@@ -175,6 +176,7 @@ class SportsPaperStrategy(Strategy):
             sport=self.config.sport,
             market_type=self.config.market_type,
             game_time=self.config.game_time,
+            vegas_implied=self.config.vegas_implied,
         ):
             return
 

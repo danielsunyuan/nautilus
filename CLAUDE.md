@@ -177,6 +177,7 @@ Both CLOB and Gamma are IP-blocked on the WSL2 host — all requests must run in
 - **importlib pattern** — examples import each other via `try/except ModuleNotFoundError` with `importlib.util` fallback.
 - **Frozen dataclasses with slots** — all model/preset types follow this pattern.
 - **Conservative parsing** — market resolver rejects anything ambiguous; no guessing.
+- **THE_ODDS_API_KEY** — required for CLV gate (`clv-focused` preset set). Free tier: 500 req/month. If absent, CLV gate passes all markets. Obtain at the-odds-api.com.
 
 ## Docker Orchestration
 

@@ -10,6 +10,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+import importlib.util
+from pathlib import Path
+import sys
+
+try:
+    from examples.live.polymarket.sports_odds_client import has_clv_edge
+except ModuleNotFoundError:
+    module_name = "examples.live.polymarket.sports_odds_client"
+    module_path = Path(__file__).resolve().with_name("sports_odds_client.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    has_clv_edge = module.has_clv_edge
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +42,7 @@ class SportsStrategyPreset:
     allowed_market_types: frozenset[str] | None = None  # None = all market types
     max_hours_before_game: float | None = None  # None = no gate; only enter within N hours of game
     min_bid_ratio: float | None = None  # bid_size/(bid_size+ask_size) threshold; None=no gate
+    min_clv_edge: float | None = None  # None = no CLV gate; 0.05 = require 5pp Polymarket discount vs Vegas
 
 
 def band_only_presets() -> tuple[SportsStrategyPreset, ...]:
@@ -179,6 +196,26 @@ def depth_focused_presets() -> tuple[SportsStrategyPreset, ...]:
     )
 
 
+def clv_focused_presets() -> tuple[SportsStrategyPreset, ...]:
+    """
+    Focused presets requiring Vegas CLV confirmation.
+
+    Same sport+market-type whitelist as focused_presets(), plus min_clv_edge=0.05.
+    Only enter when Polymarket ask is >= 5pp below Vegas implied probability.
+
+    Requires THE_ODDS_API_KEY env var. If Vegas data unavailable for a market,
+    has_clv_edge() returns True (don't block on missing data).
+    """
+    return tuple(
+        replace(
+            p,
+            name=p.name.replace("focused", "clv_focused"),
+            min_clv_edge=0.05,
+        )
+        for p in focused_presets()
+    )
+
+
 def should_enter_sports_market(
     *,
     preset: SportsStrategyPreset,
@@ -189,6 +226,7 @@ def should_enter_sports_market(
     sport: str = "",
     market_type: str = "",
     game_time: str = "",
+    vegas_implied: float | None = None,
 ) -> bool:
     """
     Pure entry decision function.
@@ -225,6 +263,15 @@ def should_enter_sports_market(
                 return False
         except (ValueError, TypeError):
             pass  # unparseable game_time — don't block
+
+    # CLV gate (after time gate, before price band)
+    if preset.min_clv_edge is not None:
+        if not has_clv_edge(
+            polymarket_ask=ask,
+            vegas_implied=vegas_implied,
+            min_edge=preset.min_clv_edge,
+        ):
+            return False
 
     # --- basic gates ---
     if ask < preset.min_ask:

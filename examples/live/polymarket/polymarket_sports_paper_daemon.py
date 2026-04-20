@@ -28,6 +28,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import httpx
 import random
 import re
 import sys
@@ -55,6 +56,7 @@ try:
     from examples.live.polymarket.sports_strategy_library import (
         SportsStrategyPreset,
         all_sports_presets,
+        clv_focused_presets,
         depth_focused_presets,
         focused_presets,
         should_enter_sports_market,
@@ -70,6 +72,7 @@ except ModuleNotFoundError:
     spec.loader.exec_module(module)
     SportsStrategyPreset = module.SportsStrategyPreset
     all_sports_presets = module.all_sports_presets
+    clv_focused_presets = module.clv_focused_presets
     depth_focused_presets = module.depth_focused_presets
     focused_presets = module.focused_presets
     should_enter_sports_market = module.should_enter_sports_market
@@ -90,6 +93,23 @@ except ModuleNotFoundError:
     spec.loader.exec_module(module)
     SportsPaperStrategy = module.SportsPaperStrategy
     SportsPaperStrategyConfig = module.SportsPaperStrategyConfig
+
+try:
+    from examples.live.polymarket.sports_odds_client import (
+        fetch_implied_prob,
+        has_clv_edge,
+    )
+except ModuleNotFoundError:
+    module_name = "examples.live.polymarket.sports_odds_client"
+    module_path = Path(__file__).resolve().with_name("sports_odds_client.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    fetch_implied_prob = module.fetch_implied_prob
+    has_clv_edge = module.has_clv_edge
 
 from nautilus_trader.adapters.polymarket import POLYMARKET
 from nautilus_trader.adapters.polymarket import POLYMARKET_VENUE
@@ -186,6 +206,8 @@ def _strategy_presets_for_set(
         return focused_presets()
     if normalized == "depth-focused":
         return depth_focused_presets()
+    if normalized == "clv-focused":
+        return clv_focused_presets()
     if normalized == "smoke":
         return (all_presets[0],)
     raise ValueError(f"unsupported preset set {preset_set!r}")
@@ -528,6 +550,25 @@ async def _default_run_round(
     preset_set: str,
 ) -> list[dict[str, Any]]:
     presets = _strategy_presets_for_set(preset_set)
+
+    # Pre-fetch Vegas implied probs (only if any preset has min_clv_edge set)
+    vegas_cache: dict[str, float | None] = {}
+    if any(p.min_clv_edge is not None for p in presets):
+        async with httpx.AsyncClient(timeout=10.0) as http_client:
+            for market in markets:
+                key = f"{market.slug}:{market.outcome_name}"
+                # Determine sport key (tennis markets use tennis_atp or tennis_wta)
+                sport_key = market.sport
+                if market.sport == "tennis":
+                    sport_key = "tennis_atp"  # default; use tennis_wta if WTA
+                vegas_cache[key] = await fetch_implied_prob(
+                    sport=sport_key,
+                    home_team=getattr(market, "home_team", ""),
+                    away_team=getattr(market, "away_team", ""),
+                    outcome_name=market.outcome_name,
+                    http_client=http_client,
+                )
+
     instrument_ids: list[str] = []
     for market in markets:
         instrument_ids.append(_build_instrument_id(market))
@@ -554,6 +595,7 @@ async def _default_run_round(
                     sport=market.sport,
                     market_type=market.market_type,
                     game_time=market.game_time,
+                    vegas_implied=vegas_cache.get(f"{market.slug}:{market.outcome_name}"),
                 ),
             )
             node.trader.add_strategy(strategy)

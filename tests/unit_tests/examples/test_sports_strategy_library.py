@@ -256,3 +256,50 @@ def test_depth_focused_presets_block_mlb():
             preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
             sport="mlb", market_type="moneyline",
         ), f"{preset.name} should not enter mlb moneyline"
+
+
+def test_clv_gate_blocks_when_overpriced():
+    preset = _make_preset(min_clv_edge=0.05)
+    # Polymarket ask=0.68, Vegas implied=0.70 → gap=0.02 < 0.05 → block
+    assert not should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.68, bid_size=100, ask_size=100,
+        sport="tennis", market_type="moneyline", vegas_implied=0.70,
+    )
+
+
+def test_clv_gate_allows_when_underpriced():
+    preset = _make_preset(min_clv_edge=0.05)
+    # Polymarket ask=0.60, Vegas implied=0.70 → gap=0.10 >= 0.05 → allow
+    assert should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+        sport="tennis", market_type="moneyline", vegas_implied=0.70,
+    )
+
+
+def test_clv_gate_passes_when_no_vegas_data():
+    preset = _make_preset(min_clv_edge=0.05)
+    # vegas_implied=None — don't block on missing data
+    assert should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+        sport="tennis", market_type="moneyline", vegas_implied=None,
+    )
+
+
+def test_no_clv_gate_ignores_vegas():
+    preset = _make_preset()  # min_clv_edge=None
+    # Even if Vegas would say "overpriced", no gate set → pass
+    assert should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+        sport="tennis", market_type="moneyline", vegas_implied=0.70,
+    )
+
+
+def test_clv_focused_presets_count_and_edge():
+    presets = lib.clv_focused_presets()
+    assert len(presets) == 10
+    assert all(p.min_clv_edge == 0.05 for p in presets)
+
+
+def test_clv_focused_presets_names():
+    presets = lib.clv_focused_presets()
+    assert all("clv_focused" in p.name for p in presets)
