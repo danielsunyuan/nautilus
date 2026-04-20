@@ -115,25 +115,83 @@ The CLOB mid-price reflects what participants with access to the correct data so
 
 ### Known resolution sources — Polymarket weather markets
 
-All temperature markets observed so far resolve via **Weather Underground** (`wunderground.com`), using the daily history page for a specific airport station. The URL pattern is:
-`https://www.wunderground.com/history/daily/{country}/{city}/{STATION_CODE}`
+Three oracle types are used across the 50 active cities (confirmed from Gamma market descriptions, April 2026):
 
-| City | Wunderground Station | URL suffix |
-|---|---|---|
-| Austin | KAUS | `us/austin/KAUS` |
-| Los Angeles | KLAX | `us/los-angeles/KLAX` |
-| San Francisco | KSFO | `us/san-francisco/KSFO` |
-| Madrid | LEMD | `es/madrid/LEMD` |
-| Milan | LIMC | `it/milan/LIMC` |
-| Amsterdam | EHAM | `nl/amsterdam/EHAM` |
-| Munich | EDDM | `de/munich/EDDM` |
-| Warsaw | EPWA | `pl/warsaw/EPWA` |
-| London | EGLC | `gb/london/EGLC` |
-| Paris | LFPG | `fr/paris/LFPG` |
-| Chongqing | ZUCK | `cn/chongqing/ZUCK` |
-| Wuhan | ZHHH | `cn/wuhan/ZHHH` |
-| Panama City | MPMG | `pa/panama-city/MPMG` |
-| Istanbul | N/A | NOAA `weather.gov/wrh/timeseries?site=LTFM` — "Temp" column daily max |
+- **WU** (46 cities): Weather Underground daily history — `wunderground.com/history/daily/{cc}/{city}/{STATION}`
+- **NOAA** (3 cities): NOAA timeseries — `weather.gov/wrh/timeseries?site={STATION}`
+- **HKO** (1 city): Hong Kong Observatory — `weather.gov.hk/en/cis/climat.htm`
+
+Live temperature data is fetched via:
+- WU cities + HKO + Moscow + Tel Aviv: TWC internal API — `api.weather.com/v1/location/{STATION}:9:{ISO2}/observations/historical.json?apiKey=...&units={e|m}&startDate=YYYYMMDD`
+- Istanbul LTFM only: Iowa State ASOS CSV — `mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station=LTFM&data=tmpc&...`
+
+See `weather_wunderground_fetcher.py` for the complete implementation (50/50 cities verified).
+
+**Critical station corrections** (naive ICAO assumptions are wrong):
+
+| City | Correct Station | Wrong assumption | Oracle |
+|---|---|---|---|
+| Denver | **KBKF** (Buckley AFB, Aurora) | KDEN | WU |
+| Jakarta | **WIHH** (Halim Perdanakusuma) | WIII | WU |
+| Lagos | **DNMM** (Murtala Muhammed) | DNBE | WU |
+| Paris | **LFPB** (Le Bourget, ~2026) | LFPG | WU |
+| Taipei | **RCSS** (Songshan Airport, ~2026) | RCTP | WU |
+| Moscow | **UUWW** (Vnukovo) | UUDD | NOAA |
+
+**Complete 50-city station map:**
+
+| City | Station | ISO | Unit | Oracle |
+|---|---|---|---|---|
+| NYC | KLGA | US | °F | WU |
+| Chicago | KORD | US | °F | WU |
+| Miami | KMIA | US | °F | WU |
+| Los Angeles | KLAX | US | °F | WU |
+| San Francisco | KSFO | US | °F | WU |
+| Seattle | KSEA | US | °F | WU |
+| Denver | KBKF | US | °F | WU |
+| Houston | KHOU | US | °F | WU |
+| Dallas | KDAL | US | °F | WU |
+| Austin | KAUS | US | °F | WU |
+| Atlanta | KATL | US | °F | WU |
+| London | EGLC | GB | °C | WU |
+| Paris | LFPB | FR | °C | WU |
+| Madrid | LEMD | ES | °C | WU |
+| Amsterdam | EHAM | NL | °C | WU |
+| Munich | EDDM | DE | °C | WU |
+| Milan | LIMC | IT | °C | WU |
+| Warsaw | EPWA | PL | °C | WU |
+| Helsinki | EFHK | FI | °C | WU |
+| Ankara | LTAC | TR | °C | WU |
+| Tokyo | RJTT | JP | °C | WU |
+| Seoul | RKSI | KR | °C | WU |
+| Busan | RKPK | KR | °C | WU |
+| Taipei | RCSS | TW | °C | WU |
+| Singapore | WSSS | SG | °C | WU |
+| Kuala Lumpur | WMKK | MY | °C | WU |
+| Jakarta | WIHH | ID | °C | WU |
+| Manila | RPLL | PH | °C | WU |
+| Beijing | ZBAA | CN | °C | WU |
+| Shanghai | ZSPD | CN | °C | WU |
+| Shenzhen | ZGSZ | CN | °C | WU |
+| Guangzhou | ZGGG | CN | °C | WU |
+| Chongqing | ZUCK | CN | °C | WU |
+| Chengdu | ZUUU | CN | °C | WU |
+| Wuhan | ZHHH | CN | °C | WU |
+| Lucknow | VILK | IN | °C | WU |
+| Karachi | OPKC | PK | °C | WU |
+| Jeddah | OEJN | SA | °C | WU |
+| Lagos | DNMM | NG | °C | WU |
+| Cape Town | FACT | ZA | °C | WU |
+| Buenos Aires | SAEZ | AR | °C | WU |
+| Sao Paulo | SBGR | BR | °C | WU |
+| Mexico City | MMMX | MX | °C | WU |
+| Toronto | CYYZ | CA | °C | WU |
+| Panama City | MPMG | PA | °C | WU |
+| Wellington | NZWN | NZ | °C | WU |
+| Istanbul | LTFM | TR | °C | NOAA |
+| Moscow | UUWW | RU | °C | NOAA |
+| Tel Aviv | LLBG | IL | °C | NOAA |
+| Hong Kong | VHHH | HK | °C | HKO |
 
 For any new city, always fetch the market ruleset from Gamma to confirm the station code before acting.
 
