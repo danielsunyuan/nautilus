@@ -111,6 +111,50 @@ def all_sports_presets() -> tuple[SportsStrategyPreset, ...]:
     return band_only_presets() + basic_presets()
 
 
+def focused_presets() -> tuple[SportsStrategyPreset, ...]:
+    """
+    Targeted presets based on confirmed edge from Apr 2026 baseline data collection.
+
+    Only basic mode (spread + liquidity filter). Only positive sport+type combos:
+    - Tennis: all market types (WR 77.6%, +5.1pp edge, n=326)
+    - UFC: all market types (WR 90.2%, +13.2pp edge, n=41)
+    - NBA: totals only (WR 80%, +28.7pp edge, n=20) — spreads bleed at -20pp
+    - MLB, hockey: excluded entirely (both negative across all arenas)
+
+    Re-run baseline analysis before modifying these whitelists.
+    """
+    arenas = [
+        ("sports_50c", 0.50, 0.60),
+        ("sports_60c", 0.60, 0.70),
+        ("sports_70c", 0.70, 0.80),
+        ("sports_80c", 0.80, 0.90),
+        ("sports_90c", 0.90, 0.981),
+    ]
+    presets = []
+    for arena, min_ask, max_ask in arenas:
+        # Tennis + UFC: all market types
+        presets.append(SportsStrategyPreset(
+            name=f"{arena}_focused_tennis_ufc",
+            arena=arena,
+            min_ask=min_ask,
+            max_ask=max_ask,
+            mode="basic",
+            allowed_sports=frozenset({"tennis", "ufc"}),
+            allowed_market_types=None,
+        ))
+        # NBA: totals only
+        presets.append(SportsStrategyPreset(
+            name=f"{arena}_focused_nba_totals",
+            arena=arena,
+            min_ask=min_ask,
+            max_ask=max_ask,
+            mode="basic",
+            allowed_sports=frozenset({"nba"}),
+            allowed_market_types=frozenset({"totals"}),
+        ))
+    return tuple(presets)
+
+
 def should_enter_sports_market(
     *,
     preset: SportsStrategyPreset,

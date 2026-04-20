@@ -83,3 +83,60 @@ def test_both_whitelists_combined():
     assert not should_enter_sports_market(
         preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100, sport="tennis", market_type="totals"
     )
+
+
+def test_focused_presets_exist():
+    presets = lib.focused_presets()
+    assert len(presets) > 0
+    # All focused presets are basic mode
+    assert all(p.mode == "basic" for p in presets)
+    # All focused presets have sport or market_type whitelists
+    assert all(
+        p.allowed_sports is not None or p.allowed_market_types is not None
+        for p in presets
+    )
+
+
+def test_focused_presets_block_mlb():
+    presets = lib.focused_presets()
+    for preset in presets:
+        result = should_enter_sports_market(
+            preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+            sport="mlb", market_type="moneyline"
+        )
+        assert not result, f"{preset.name} should not enter mlb moneyline"
+
+
+def test_focused_presets_block_nba_spreads():
+    presets = lib.focused_presets()
+    for preset in presets:
+        result = should_enter_sports_market(
+            preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+            sport="nba", market_type="spreads"
+        )
+        assert not result, f"{preset.name} should not enter nba spreads"
+
+
+def test_focused_presets_allow_tennis():
+    presets = lib.focused_presets()
+    # At least one preset allows tennis moneyline in the 60c band
+    any_tennis = any(
+        should_enter_sports_market(
+            preset=p, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+            sport="tennis", market_type="moneyline"
+        )
+        for p in presets
+    )
+    assert any_tennis
+
+
+def test_focused_presets_allow_nba_totals():
+    presets = lib.focused_presets()
+    any_nba_totals = any(
+        should_enter_sports_market(
+            preset=p, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+            sport="nba", market_type="totals"
+        )
+        for p in presets
+    )
+    assert any_nba_totals
