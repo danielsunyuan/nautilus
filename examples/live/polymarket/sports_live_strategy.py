@@ -139,7 +139,9 @@ class SportsPaperStrategy(Strategy):
                 bankroll_usd=bankroll_usd,
                 max_fraction=preset.kelly_max_fraction,
             )
-            target_usd: Decimal | None = Decimal(str(kelly_usd)) if kelly_usd > 0 else None
+            if kelly_usd <= 0:
+                return Decimal("0")
+            target_usd: Decimal | None = Decimal(str(kelly_usd))
         else:
             target_usd = self.config.target_usd_per_market
 
