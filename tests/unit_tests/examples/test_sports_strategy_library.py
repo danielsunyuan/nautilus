@@ -269,7 +269,7 @@ def test_clv_gate_blocks_when_overpriced():
 
 def test_clv_gate_allows_when_underpriced():
     preset = _make_preset(min_clv_edge=0.05)
-    # Polymarket ask=0.60, Vegas implied=0.70 → gap=0.10 >= 0.05 → allow
+    # Polymarket ask=0.63, Vegas implied=0.70 → gap=0.07 >= 0.05 → allow
     assert should_enter_sports_market(
         preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
         sport="tennis", market_type="moneyline", vegas_implied=0.70,

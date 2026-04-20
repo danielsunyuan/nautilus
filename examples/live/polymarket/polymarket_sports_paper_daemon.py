@@ -95,10 +95,7 @@ except ModuleNotFoundError:
     SportsPaperStrategyConfig = module.SportsPaperStrategyConfig
 
 try:
-    from examples.live.polymarket.sports_odds_client import (
-        fetch_implied_prob,
-        has_clv_edge,
-    )
+    from examples.live.polymarket.sports_odds_client import fetch_implied_prob
 except ModuleNotFoundError:
     module_name = "examples.live.polymarket.sports_odds_client"
     module_path = Path(__file__).resolve().with_name("sports_odds_client.py")
@@ -109,7 +106,6 @@ except ModuleNotFoundError:
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     fetch_implied_prob = module.fetch_implied_prob
-    has_clv_edge = module.has_clv_edge
 
 from nautilus_trader.adapters.polymarket import POLYMARKET
 from nautilus_trader.adapters.polymarket import POLYMARKET_VENUE
