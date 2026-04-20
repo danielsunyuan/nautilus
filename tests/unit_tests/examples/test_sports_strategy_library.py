@@ -87,7 +87,7 @@ def test_both_whitelists_combined():
 
 def test_focused_presets_exist():
     presets = lib.focused_presets()
-    assert len(presets) > 0
+    assert len(presets) == 10  # 2 per arena × 5 arenas
     # All focused presets are basic mode
     assert all(p.mode == "basic" for p in presets)
     # All focused presets have sport or market_type whitelists
