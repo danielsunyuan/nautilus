@@ -1,0 +1,25 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+RUN useradd --create-home appuser
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+      "nautilus_trader" \
+      "httpx>=0.28" \
+      "websockets>=15.0.1" \
+      "py-clob-client"
+
+# Copy only the polymarket recorder scripts (lightweight slice of the repo).
+# Full nautilus source is volume-mounted at /workspace/nautilus for services
+# that need to run example scripts (weather live daemon, exit server).
+COPY --chown=appuser:appuser scripts/ ./scripts/
+
+USER appuser
+
+CMD ["python", "-m", "scripts.polymarket_crypto_5m_nautilus_record", "--help"]

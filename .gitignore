@@ -81,6 +81,7 @@ env/
 !scripts/ci/verify-ci-inputs.sh
 !.docker/nordvpn_entrypoint.sh
 !.docker/nordvpn_healthcheck.sh
+!.docker/polymarket_execution_entrypoint.sh
 *tmp/
 *temp/
 
