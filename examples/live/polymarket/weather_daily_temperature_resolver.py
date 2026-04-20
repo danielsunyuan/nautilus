@@ -7,6 +7,7 @@ Conservative parser — rejects anything it cannot normalize safely.
 
 from __future__ import annotations
 
+import json as _json
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -162,7 +163,7 @@ def parse_daily_temperature_market(
         # Store threshold in original unit, record the unit
         return DailyTemperatureMarket(
             slug=gamma_market.get("slug", ""),
-            condition_id=gamma_market.get("condition_id", ""),
+            condition_id=gamma_market.get("condition_id") or gamma_market.get("conditionId", ""),
             city=city,
             observation_date=observation_date,
             metric=metric,
@@ -170,7 +171,7 @@ def parse_daily_temperature_market(
             yes_token_id=yes_token_id,
             no_token_id=no_token_id,
             active=bool(gamma_market.get("active", False)),
-            accepting_orders=bool(gamma_market.get("accepting_orders", False)),
+            accepting_orders=bool(gamma_market.get("accepting_orders") or gamma_market.get("acceptingOrders", False)),
         )
 
     # Try legacy pattern (original assumed format)
@@ -190,7 +191,7 @@ def parse_daily_temperature_market(
 
         return DailyTemperatureMarket(
             slug=gamma_market.get("slug", ""),
-            condition_id=gamma_market.get("condition_id", ""),
+            condition_id=gamma_market.get("condition_id") or gamma_market.get("conditionId", ""),
             city=city,
             observation_date=observation_date,
             metric=metric,
@@ -198,7 +199,7 @@ def parse_daily_temperature_market(
             yes_token_id=yes_token_id,
             no_token_id=no_token_id,
             active=bool(gamma_market.get("active", False)),
-            accepting_orders=bool(gamma_market.get("accepting_orders", False)),
+            accepting_orders=bool(gamma_market.get("accepting_orders") or gamma_market.get("acceptingOrders", False)),
         )
 
     return None
@@ -218,10 +219,11 @@ async def _fetch_gamma_page(
     response = await http_client.get(
         f"{gamma_base_url}/markets",
         params=params,
-        timeout=timeout,
+        timeout_secs=int(timeout),
     )
-    response.raise_for_status()
-    data = response.json()
+    if response.status >= 400:
+        raise RuntimeError(f"Gamma API returned HTTP {response.status}")
+    data = _json.loads(response.body)
     return data if isinstance(data, list) else []
 
 
@@ -232,22 +234,123 @@ async def _paginated_gamma_fetch(
     base_params: dict[str, str],
     timeout: float,
     limit: int = _GAMMA_PAGE_LIMIT,
+    max_retries: int = 3,
 ) -> list[dict]:
     """Fetch all pages from Gamma /markets with offset pagination."""
+    import asyncio as _asyncio
+
     all_markets: list[dict] = []
     offset = 0
+    consecutive_failures = 0
     while True:
         params = {**base_params, "limit": str(limit), "offset": str(offset)}
-        page = await _fetch_gamma_page(
-            http_client=http_client,
-            gamma_base_url=gamma_base_url,
-            params=params,
-            timeout=timeout,
-        )
+        page: list[dict] = []
+        for attempt in range(max_retries):
+            try:
+                page = await _fetch_gamma_page(
+                    http_client=http_client,
+                    gamma_base_url=gamma_base_url,
+                    params=params,
+                    timeout=timeout,
+                )
+                consecutive_failures = 0
+                break
+            except Exception:
+                if attempt < max_retries - 1:
+                    await _asyncio.sleep(2 ** attempt)
+                else:
+                    consecutive_failures += 1
+        if consecutive_failures >= 2:
+            break
         all_markets.extend(page)
         if len(page) < limit:
             break
         offset += limit
+    return all_markets
+
+
+async def _fetch_weather_events(
+    *,
+    http_client: Any,
+    gamma_base_url: str,
+    timeout: float,
+    active: bool = True,
+    closed: bool = False,
+) -> list[dict]:
+    """Fetch weather events from Gamma ``/events?tag_slug=weather``.
+
+    Returns the nested market dicts extracted from each event.
+    This is much faster than paginating ``/markets`` (hundreds of markets
+    vs tens of thousands).
+    """
+    import asyncio as _asyncio
+
+    all_markets: list[dict] = []
+    offset = 0
+    limit = 100
+    params: dict[str, str] = {"tag_slug": "weather", "limit": str(limit)}
+    if active:
+        params["active"] = "true"
+    if closed:
+        params["closed"] = "true"
+    else:
+        params["closed"] = "false"
+
+    while True:
+        page_params = {**params, "offset": str(offset)}
+        qs = "&".join(f"{k}={v}" for k, v in page_params.items())
+        url = f"{gamma_base_url}/events?{qs}"
+
+        page_events: list[dict] = []
+        for attempt in range(3):
+            try:
+                response = await http_client.get(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"},
+                    timeout_secs=int(timeout),
+                )
+                if response.status >= 400:
+                    raise RuntimeError(f"Gamma events API returned HTTP {response.status}")
+                page_events = _json.loads(response.body)
+                if not isinstance(page_events, list):
+                    page_events = []
+                break
+            except Exception:
+                if attempt < 2:
+                    await _asyncio.sleep(2 ** attempt)
+
+        for event in page_events:
+            markets = event.get("markets", [])
+            if not isinstance(markets, list):
+                continue
+            for market in markets:
+                # The /events endpoint omits the ``tokens`` list that
+                # ``parse_daily_temperature_market`` needs.  Synthesize it
+                # from ``clobTokenIds`` + ``outcomes`` when missing.
+                if "tokens" not in market:
+                    clob_ids = market.get("clobTokenIds")
+                    outcomes = market.get("outcomes")
+                    if isinstance(clob_ids, str):
+                        try:
+                            clob_ids = _json.loads(clob_ids)
+                        except (ValueError, TypeError):
+                            clob_ids = None
+                    if isinstance(outcomes, str):
+                        try:
+                            outcomes = _json.loads(outcomes)
+                        except (ValueError, TypeError):
+                            outcomes = None
+                    if isinstance(clob_ids, list) and isinstance(outcomes, list) and len(clob_ids) == len(outcomes):
+                        market["tokens"] = [
+                            {"token_id": tid, "outcome": outcome}
+                            for tid, outcome in zip(clob_ids, outcomes)
+                        ]
+                all_markets.append(market)
+
+        if len(page_events) < limit:
+            break
+        offset += limit
+
     return all_markets
 
 
@@ -260,9 +363,9 @@ async def discover_daily_temperature_markets(
 ) -> list[DailyTemperatureMarket]:
     """Discover daily temperature markets from Gamma API.
 
-    Fetches broadly (no tag filter — tags vary across markets) and relies
-    on the conservative regex parser to identify temperature markets.
-    Paginates through all results.
+    Uses the ``/events?tag_slug=weather`` endpoint to fetch weather events
+    (typically ~100 events with ~10 markets each), then applies the
+    conservative regex parser to identify daily temperature markets.
 
     Args:
         include_closed: If True, also fetch closed/resolved markets
@@ -270,16 +373,13 @@ async def discover_daily_temperature_markets(
     """
     results: list[DailyTemperatureMarket] = []
 
-    # Fetch active markets (always)
-    active_params: dict[str, str] = {
-        "active": "true",
-        "closed": "false",
-    }
-    raw_active = await _paginated_gamma_fetch(
+    # Fetch active weather markets via events endpoint
+    raw_active = await _fetch_weather_events(
         http_client=http_client,
         gamma_base_url=gamma_base_url,
-        base_params=active_params,
         timeout=timeout,
+        active=True,
+        closed=False,
     )
     for raw in raw_active:
         parsed = parse_daily_temperature_market(raw)
@@ -288,14 +388,12 @@ async def discover_daily_temperature_markets(
 
     # Optionally fetch closed markets (for settlement resolution)
     if include_closed:
-        closed_params: dict[str, str] = {
-            "closed": "true",
-        }
-        raw_closed = await _paginated_gamma_fetch(
+        raw_closed = await _fetch_weather_events(
             http_client=http_client,
             gamma_base_url=gamma_base_url,
-            base_params=closed_params,
             timeout=timeout,
+            active=False,
+            closed=True,
         )
         seen_slugs = {m.slug for m in results}
         for raw in raw_closed:
