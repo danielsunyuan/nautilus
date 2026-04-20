@@ -126,6 +126,7 @@ async def _request_markets_page(
     resp: HttpResponse = await http_client.get(
         base_endpoint,
         params=effective_params,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"},
         timeout_secs=max(1, ceil(timeout)),
     )
 

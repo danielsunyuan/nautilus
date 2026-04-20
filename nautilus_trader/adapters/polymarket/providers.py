@@ -213,19 +213,27 @@ class PolymarketInstrumentProvider(InstrumentProvider):
         # Create a copy to avoid mutating the caller's filters
         filters = filters.copy() if filters is not None else {}
 
-        if (
-            len(condition_ids) <= 100
-        ):  # We can filter directly by condition_id, but there is an API limit of max 100 condition_ids in the query string
+        # API limit: max 100 condition_ids per query string. Batch if needed.
+        _BATCH_SIZE = 100
+        if len(condition_ids) <= _BATCH_SIZE:
             self._log.info(
                 f"Loading {len(instrument_ids)} instruments from {len(condition_ids)} markets, using direct condition_id filtering",
             )
             filters["condition_ids"] = condition_ids
+            all_markets = await list_markets(http_client=self._http_client, filters=filters)
         else:
             self._log.info(
-                f"Loading {len(instrument_ids)} instruments from {len(condition_ids)} markets, using bulk load of all markets",
+                f"Loading {len(instrument_ids)} instruments from {len(condition_ids)} markets, "
+                f"using {(len(condition_ids) + _BATCH_SIZE - 1) // _BATCH_SIZE} batched Gamma API calls",
             )
+            all_markets = []
+            for i in range(0, len(condition_ids), _BATCH_SIZE):
+                batch = condition_ids[i : i + _BATCH_SIZE]
+                batch_filters = {**filters, "condition_ids": batch}
+                batch_markets = await list_markets(http_client=self._http_client, filters=batch_filters)
+                all_markets.extend(batch_markets)
 
-        markets = await list_markets(http_client=self._http_client, filters=filters)
+        markets = all_markets
         self._log.info(f"Loaded {len(markets)} markets using Gamma API")
         for market in markets:
             condition_id = market.get("conditionId")
@@ -371,6 +379,9 @@ class PolymarketInstrumentProvider(InstrumentProvider):
 
         markets_visited = 0
         next_cursor = filters.get("next_cursor", "MA==")
+        # Track which target condition IDs have been loaded so we can stop early.
+        target_condition_ids: set[str] = set(condition_ids) if condition_ids else set()
+        found_condition_ids: set[str] = set()
 
         while next_cursor != "LTE=":
             self._log.info(f"Cursor = '{next_cursor}', markets visited = {markets_visited}")
@@ -386,6 +397,19 @@ class PolymarketInstrumentProvider(InstrumentProvider):
 
             next_cursor = response["next_cursor"]
             markets_visited += len(response["data"])
+
+            # Early exit: stop paging once all target instruments have been found.
+            if target_condition_ids:
+                for m in page_markets:
+                    cid = m.get("condition_id")
+                    if cid:
+                        found_condition_ids.add(cid)
+                if found_condition_ids >= target_condition_ids:
+                    self._log.info(
+                        f"All {len(target_condition_ids)} target instruments found "
+                        f"after {markets_visited} markets; stopping early",
+                    )
+                    break
 
     @staticmethod
     def _filter_page_markets(
