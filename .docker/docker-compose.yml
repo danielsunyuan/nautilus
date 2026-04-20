@@ -353,6 +353,7 @@ services:
   weather-daemon-vpn:
     container_name: nautilus-weather-daemon-vpn
     profiles: ["vpn"]
+    image: nautilus-papertrade:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -472,6 +473,7 @@ services:
   weather-settlement-vpn:
     container_name: nautilus-weather-settlement-vpn
     profiles: ["vpn"]
+    image: nautilus-papertrade:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -481,7 +483,7 @@ services:
       - python
       - /workspace/examples/live/polymarket/weather_daily_temperature_settlement.py
       - --output-dir
-      - /workspace/outputs
+      - /workspace/outputs/polymarket/runs
       - --poll-interval
       - "900"
       - --report-md
@@ -691,7 +693,10 @@ services:
       - path: ../.env.polymarket
         required: false
     environment:
-      PYTHONPATH: "/app:/workspace/nautilus"
+      # /app only — the script appends its own repo root via sys.path.append so
+      # examples imports work, while pip-installed nautilus_trader in site-packages
+      # takes precedence over the local source (which has no compiled .so files).
+      PYTHONPATH: "/app"
       POLYMARKET_REQUIRE_UNBLOCKED: "${POLYMARKET_REQUIRE_UNBLOCKED:-1}"
       POLYMARKET_EXPECT_COUNTRY: "${POLYMARKET_EXPECT_COUNTRY:-JP}"
       NAUTILUS_CACHE_HOST: "${NAUTILUS_VPN_CACHE_HOST:-172.22.0.3}"
@@ -737,7 +742,7 @@ services:
       - path: ../.env.polymarket
         required: false
     environment:
-      PYTHONPATH: "/app:/workspace/nautilus"
+      PYTHONPATH: "/app"
       POLYMARKET_REQUIRE_UNBLOCKED: "${POLYMARKET_REQUIRE_UNBLOCKED:-1}"
       POLYMARKET_EXPECT_COUNTRY: "${POLYMARKET_EXPECT_COUNTRY:-JP}"
       EXIT_SERVER_OUTPUT_DIR: "/workspace/nautilus/outputs"
