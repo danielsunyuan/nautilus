@@ -34,6 +34,8 @@ class SportsPaperStrategyConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     preset: SportsStrategyPreset
     order_qty: Decimal
+    sport: str = ""
+    market_type: str = ""
     family_instrument_ids: tuple[InstrumentId, ...] = ()
     target_usd_per_market: Decimal | None = None
     min_order_size_shares: Decimal = Decimal("0")
@@ -169,6 +171,8 @@ class SportsPaperStrategy(Strategy):
             ask=ask,
             bid_size=bid_size,
             ask_size=ask_size,
+            sport=self.config.sport,
+            market_type=self.config.market_type,
         ):
             return
 

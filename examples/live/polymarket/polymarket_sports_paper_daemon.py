@@ -543,6 +543,8 @@ async def _default_run_round(
                     instrument_id=InstrumentId.from_str(inst_id_str),
                     preset=preset,
                     order_qty=Decimal(str(preset.order_qty)),
+                    sport=market.sport,
+                    market_type=market.market_type,
                 ),
             )
             node.trader.add_strategy(strategy)
