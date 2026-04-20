@@ -25,6 +25,7 @@ class SportsStrategyPreset:
     allowed_sports: frozenset[str] | None = None        # None = all sports
     allowed_market_types: frozenset[str] | None = None  # None = all market types
     max_hours_before_game: float | None = None  # None = no gate; only enter within N hours of game
+    min_bid_ratio: float | None = None  # bid_size/(bid_size+ask_size) threshold; None=no gate
 
 
 def band_only_presets() -> tuple[SportsStrategyPreset, ...]:
@@ -158,6 +159,25 @@ def focused_presets() -> tuple[SportsStrategyPreset, ...]:
     return tuple(presets)
 
 
+def depth_focused_presets() -> tuple[SportsStrategyPreset, ...]:
+    """
+    Focused presets with an additional bid-side depth filter.
+
+    Same sport+market-type whitelist as focused_presets(), plus min_bid_ratio=0.55.
+    Only enter when bid-side book weight is >= 55% of total visible liquidity.
+
+    Concept ported from BTC microprice_support strategy (+0.16% avg ROI, 56.6% WR).
+    Re-run baseline analysis before adjusting the threshold.
+    """
+    base = focused_presets()
+    return tuple(
+        SportsStrategyPreset(
+            **{**vars(p) | {"name": p.name.replace("focused", "depth_focused"), "min_bid_ratio": 0.55}}
+        )
+        for p in base
+    )
+
+
 def should_enter_sports_market(
     *,
     preset: SportsStrategyPreset,
@@ -219,5 +239,13 @@ def should_enter_sports_market(
         return False
     if ask_size < preset.min_ask_size:
         return False
+
+    # Bid-side depth gate
+    if preset.min_bid_ratio is not None:
+        total_size = bid_size + ask_size
+        if total_size <= 0:
+            return False
+        if bid_size / total_size < preset.min_bid_ratio:
+            return False
 
     return True

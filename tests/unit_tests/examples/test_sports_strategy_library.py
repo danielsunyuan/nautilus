@@ -191,3 +191,38 @@ def test_time_gate_naive_iso_string_is_treated_as_utc():
         preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
         sport="tennis", market_type="moneyline", game_time=future_naive,
     )
+
+
+def test_bid_ratio_blocks_ask_heavy_book():
+    preset = _make_preset(min_bid_ratio=0.55)
+    # bid_size=30, ask_size=100 → ratio=0.23 < 0.55 → block
+    assert not should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.63, bid_size=30, ask_size=100,
+        sport="tennis", market_type="moneyline",
+    )
+
+
+def test_bid_ratio_allows_bid_heavy_book():
+    preset = _make_preset(min_bid_ratio=0.55)
+    # bid_size=100, ask_size=50 → ratio=0.67 >= 0.55 → allow
+    assert should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=50,
+        sport="tennis", market_type="moneyline",
+    )
+
+
+def test_bid_ratio_zero_total_size_does_not_crash():
+    preset = _make_preset(min_bid_ratio=0.55)
+    # both sizes zero — should not divide by zero, should block
+    assert not should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.63, bid_size=0, ask_size=0,
+        sport="tennis", market_type="moneyline",
+    )
+
+
+def test_no_bid_ratio_passes_ask_heavy_book():
+    preset = _make_preset()  # min_bid_ratio=None
+    assert should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.63, bid_size=10, ask_size=90,
+        sport="tennis", market_type="moneyline",
+    )

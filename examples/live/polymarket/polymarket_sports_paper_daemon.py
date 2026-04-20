@@ -55,6 +55,7 @@ try:
     from examples.live.polymarket.sports_strategy_library import (
         SportsStrategyPreset,
         all_sports_presets,
+        depth_focused_presets,
         focused_presets,
         should_enter_sports_market,
     )
@@ -69,6 +70,7 @@ except ModuleNotFoundError:
     spec.loader.exec_module(module)
     SportsStrategyPreset = module.SportsStrategyPreset
     all_sports_presets = module.all_sports_presets
+    depth_focused_presets = module.depth_focused_presets
     focused_presets = module.focused_presets
     should_enter_sports_market = module.should_enter_sports_market
 
@@ -182,6 +184,8 @@ def _strategy_presets_for_set(
         return tuple(p for p in all_presets if p.mode == "basic")
     if normalized == "focused":
         return focused_presets()
+    if normalized == "depth-focused":
+        return depth_focused_presets()
     if normalized == "smoke":
         return (all_presets[0],)
     raise ValueError(f"unsupported preset set {preset_set!r}")
