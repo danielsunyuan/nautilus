@@ -28,6 +28,24 @@ This repository is worked from a Dockerized development environment.
 - Keep one stable `TraderId` per algo so Redis keys and streams stay partitioned across concurrent papertrade runs, and keep `use_instance_id=True` so each run gets a fresh namespace instead of reloading stale sandbox state.
 - Credentials remain in local `.env*` files and are injected into the workspace container through Compose; never print secret values.
 
+## CRITICAL: Polymarket resolution mechanism
+
+**Any decision involving a Polymarket position — entry, exit, hold, P&L assessment — must account for how that market resolves.**
+
+Each market has a ruleset specifying the exact data source Polymarket's oracle uses. That named source is the only authoritative source for resolution. No proxy data (third-party weather APIs, generic sports feeds, alternative price sources) is valid, even if factually accurate elsewhere — resolution is determined solely by the ruleset source.
+
+**Required steps before any exit or hold decision:**
+
+1. Fetch the market ruleset from Gamma inside the VPN container (`GET /markets?condition_id=COND_ID` → `description`/`resolution_source` field).
+2. Identify the named resolution data source.
+3. Query that source if directly accessible; otherwise treat the CLOB mid-price as the best available proxy.
+4. Never substitute a third-party source (wttr.in, Open-Meteo, generic sports feeds, etc.).
+5. If the resolution source cannot be determined, state the uncertainty explicitly rather than acting on proxy data.
+
+The CLOB mid-price reflects what participants with access to the correct resolution source believe. A market trading at 0.99 should be treated as near-certain YES unless the resolution source itself contradicts it.
+
+This applies to all market types: weather, sports, crypto, and any other event market.
+
 ## Nautilus runtime protocol
 
 - Follow the Nautilus runtime model rather than building direct exchange scripts when adding execution behavior.
