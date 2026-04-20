@@ -38,13 +38,21 @@ DEFAULT_SIGNAL_PATH = os.environ.get(
     "/data/nautilus_export/live_signals/sentinel_news_signals.jsonl",
 )
 DEFAULT_POLL_INTERVAL = float(os.environ.get("SENTINEL_POLL_INTERVAL", "60"))
-DEFAULT_MIN_RELEVANCE = float(os.environ.get("SENTINEL_MIN_RELEVANCE", "0.25"))
+DEFAULT_MIN_RELEVANCE = float(os.environ.get("SENTINEL_MIN_RELEVANCE", "0.05"))
 DEFAULT_SENTINEL_API_KEY = os.environ.get("SENTINEL_API_KEY", "supersecret")
 
 _STOP_WORDS = frozenset(
     "a an the is are was were be been being have has had do does did will would could should "
     "may might shall can cannot of in on at to for with by from this that these those".split()
 )
+
+_CATEGORY_TAG_SLUGS: dict[str, list[str]] = {
+    "conflict": ["geopolitics", "ukraine", "russia", "middle-east", "israel", "wars"],
+    "election": ["elections", "politics"],
+    "financial": ["crypto", "economics", "finance", "bitcoin"],
+    "geopolitical": ["geopolitics", "politics", "trump", "united-nations"],
+    "other": ["geopolitics", "politics", "trump"],
+}
 
 _CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "conflict": ["war", "attack", "military", "troops", "missile", "bomb", "invasion", "offensive",
@@ -99,19 +107,33 @@ def classify_story(story_text: str) -> str:
 
 
 def extract_story_text(story: dict[str, Any]) -> tuple[str, str]:
-    """Extract combined text and headline from a Sentinel story dict."""
+    """Extract combined text and headline from a Sentinel news item dict.
+
+    Supports two layouts:
+    - Flat (real API): item has top-level ``title`` and ``content`` fields.
+    - Nested (legacy/analyst): item has a ``news_items`` list of sub-items,
+      each optionally with a ``review`` sub-dict.
+    """
     parts = []
     headline = str(story.get("title") or "")
     if headline:
         parts.append(headline)
+
+    # Flat layout: content is directly on the item
+    content = str(story.get("content") or "")
+    if content:
+        parts.append(content[:500])
+
+    # Nested layout: analyst-created report items with embedded news_items
     for item in story.get("news_items", []):
         review = item.get("review") or {}
         item_title = str(review.get("title") or item.get("title") or "")
-        content = str(item.get("content") or "")
+        item_content = str(item.get("content") or "")
         if item_title:
             parts.append(item_title)
-        if content:
-            parts.append(content[:500])
+        if item_content:
+            parts.append(item_content[:500])
+
     if not headline and parts:
         headline = parts[0]
     return " ".join(parts), headline
@@ -150,9 +172,14 @@ def build_polymarket_instrument_id(*, token_id: str, market_slug: str, outcome: 
     return f"PM-{safe_slug}-{safe_outcome}-{safe_token}.POLYMARKET"
 
 
+_DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+}
+
+
 def _http_get_json(url: str, *, headers: dict | None = None, timeout: float = 10.0) -> Any:
-    headers = headers or {}
-    req = urllib.request.Request(url, headers=headers)
+    merged = {**_DEFAULT_HEADERS, **(headers or {})}
+    req = urllib.request.Request(url, headers=merged)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())
@@ -162,6 +189,30 @@ def _http_get_json(url: str, *, headers: dict | None = None, timeout: float = 10
         raise RuntimeError(f"URL error from {url}: {exc.reason}") from exc
 
 
+def fetch_sentinel_jwt(
+    *,
+    base_url: str,
+    username: str,
+    password: str,
+    timeout: float = 10.0,
+) -> str:
+    """Login to Sentinel and return a JWT access token."""
+    url = f"{base_url.rstrip('/')}/api/auth/login"
+    payload = json.dumps({"username": username, "password": password}).encode()
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode())
+            return str(data.get("access_token") or data.get("token") or "")
+    except Exception as exc:
+        raise RuntimeError(f"Sentinel JWT login failed: {exc}") from exc
+
+
 def fetch_sentinel_stories(
     *,
     base_url: str,
@@ -169,9 +220,26 @@ def fetch_sentinel_stories(
     limit: int = 20,
     timeout: float = 10.0,
 ) -> list[dict[str, Any]]:
-    """Fetch recent stories from Sentinel Core REST API."""
-    url = f"{base_url.rstrip('/')}/api/analyze/report-items?limit={limit}"
-    headers = {"Authorization": f"Bearer {api_key}"}
+    """Fetch recent news items from Sentinel Core REST API.
+
+    Authenticates via JWT (POST /api/auth/login with api_key used as password
+    for the default 'user' account), then fetches from /api/assess/news-items.
+    Falls back to using api_key directly as a Bearer token if login fails.
+    """
+    # Try JWT login first
+    try:
+        token = fetch_sentinel_jwt(
+            base_url=base_url,
+            username="user",
+            password=api_key,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        print(json.dumps({"event": "sentinel_jwt_error", "reason": str(exc)}, sort_keys=True), flush=True)
+        token = api_key  # fall back to raw key
+
+    url = f"{base_url.rstrip('/')}/api/assess/news-items?limit={limit}"
+    headers = {"Authorization": f"Bearer {token}"}
     try:
         data = _http_get_json(url, headers=headers, timeout=timeout)
         if isinstance(data, dict):
@@ -182,25 +250,47 @@ def fetch_sentinel_stories(
         return []
 
 
-def fetch_gamma_markets(
+def fetch_gamma_markets_for_category(
     *,
     base_url: str,
-    query: str,
-    limit: int = 10,
+    category: str,
+    limit_per_tag: int = 5,
     timeout: float = 10.0,
 ) -> list[dict[str, Any]]:
-    """Search Gamma API for open markets matching a keyword query."""
-    safe_q = re.sub(r"[^a-zA-Z0-9\s-]", "", query)[:80]
-    # Gamma supports ?_c=tag_slug or free text search via ?question_contains_text
-    url = f"{base_url.rstrip('/')}/markets?active=true&closed=false&limit={limit}"
-    try:
-        data = _http_get_json(url, timeout=timeout)
-        if isinstance(data, list):
-            return data
-        return data.get("markets", data.get("data", []))
-    except Exception as exc:
-        print(json.dumps({"event": "gamma_fetch_error", "query": query, "reason": str(exc)}, sort_keys=True), flush=True)
-        return []
+    """Fetch active Polymarket markets from Gamma /events, filtered by category tag slugs.
+
+    Uses the /events endpoint (which contains nested markets) because /markets
+    only returns featured markets regardless of tag filters.
+    """
+    tag_slugs = _CATEGORY_TAG_SLUGS.get(category, _CATEGORY_TAG_SLUGS["other"])
+    seen_condition_ids: set[str] = set()
+    all_markets: list[dict[str, Any]] = []
+
+    for slug in tag_slugs:
+        url = (
+            f"{base_url.rstrip('/')}/events"
+            f"?tag_slug={slug}&active=true&closed=false&limit={limit_per_tag}"
+        )
+        try:
+            events = _http_get_json(url, timeout=timeout)
+            if not isinstance(events, list):
+                events = events.get("events", events.get("data", []))
+            for event in events:
+                for market in event.get("markets", []):
+                    cid = str(market.get("conditionId") or "")
+                    if cid and cid not in seen_condition_ids:
+                        seen_condition_ids.add(cid)
+                        all_markets.append(market)
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {"event": "gamma_fetch_error", "tag_slug": slug, "reason": str(exc)},
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+
+    return all_markets
 
 
 def _now_ns() -> int:
@@ -217,13 +307,16 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 def process_story(
     *,
     story: dict[str, Any],
-    gamma_base_url: str,
+    category_markets: dict[str, list[dict[str, Any]]],
     min_relevance: float,
     signal_path: Path,
     emitted_story_ids: set[str],
-    gamma_timeout: float = 10.0,
 ) -> list[SentinelNewsSignal]:
-    """Map a single Sentinel story to Polymarket markets and emit signals."""
+    """Map a single Sentinel story to Polymarket markets and emit signals.
+
+    ``category_markets`` is a pre-fetched dict of {category: [market_dict]}
+    so no per-story Gamma API calls are needed.
+    """
     story_id = str(story.get("id") or story.get("story_id") or "")
     if not story_id or story_id in emitted_story_ids:
         return []
@@ -232,16 +325,13 @@ def process_story(
     if not story_text.strip():
         return []
 
-    category = classify_story(story_text)
-    tokens = sorted(_tokenize(story_text), key=len, reverse=True)
-    search_query = " ".join(tokens[:3])
+    # Skip non-English stories — Cyrillic/CJK/etc. tokenize to empty sets
+    # and can never match English Polymarket market questions.
+    if len(_tokenize(story_text)) < 3:
+        return []
 
-    raw_markets = fetch_gamma_markets(
-        base_url=gamma_base_url,
-        query=search_query,
-        timeout=gamma_timeout,
-    )
-    active_markets = filter_active_markets(raw_markets)
+    category = classify_story(story_text)
+    active_markets = category_markets.get(category, [])
 
     signals: list[SentinelNewsSignal] = []
     now = datetime.now(timezone.utc)
@@ -256,10 +346,17 @@ def process_story(
         condition_id = str(market.get("conditionId") or "")
         end_raw = str(market.get("endDate") or "")
 
-        clob_token_ids = market.get("clobTokenIds", [])
+        raw_clob = market.get("clobTokenIds", [])
+        # Gamma /events returns clobTokenIds as a JSON-encoded string, not a list.
+        if isinstance(raw_clob, str):
+            try:
+                raw_clob = json.loads(raw_clob)
+            except (ValueError, TypeError):
+                raw_clob = []
+        clob_token_ids = raw_clob if isinstance(raw_clob, list) else []
         yes_token_id = ""
         no_token_id = ""
-        if isinstance(clob_token_ids, list) and len(clob_token_ids) >= 2:
+        if len(clob_token_ids) >= 2:
             yes_token_id = str(clob_token_ids[0])
             no_token_id = str(clob_token_ids[1])
 
@@ -299,6 +396,48 @@ def process_story(
     return signals
 
 
+def _fetch_all_category_markets(
+    *,
+    gamma_url: str,
+    timeout: float = 10.0,
+) -> dict[str, list[dict[str, Any]]]:
+    """Pre-fetch and cache active markets for all categories in one pass.
+
+    Returns a dict mapping category name → list of active market dicts.
+    Gamma calls are batched by category (not per-story) to keep total
+    requests to ~5 category sets regardless of story count.
+    """
+    result: dict[str, list[dict[str, Any]]] = {}
+    for category, tag_slugs in _CATEGORY_TAG_SLUGS.items():
+        seen: set[str] = set()
+        markets: list[dict[str, Any]] = []
+        for slug in tag_slugs:
+            url = (
+                f"{gamma_url.rstrip('/')}/events"
+                f"?tag_slug={slug}&active=true&closed=false&limit=5"
+            )
+            try:
+                events = _http_get_json(url, timeout=timeout)
+                if not isinstance(events, list):
+                    events = events.get("events", events.get("data", []))
+                for event in events:
+                    for m in event.get("markets", []):
+                        cid = str(m.get("conditionId") or "")
+                        if cid and cid not in seen:
+                            seen.add(cid)
+                            markets.append(m)
+            except Exception as exc:
+                print(
+                    json.dumps(
+                        {"event": "gamma_fetch_error", "tag_slug": slug, "reason": str(exc)},
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+        result[category] = filter_active_markets(markets)
+    return result
+
+
 def run_bridge_loop(
     *,
     sentinel_url: str = DEFAULT_SENTINEL_URL,
@@ -314,14 +453,18 @@ def run_bridge_loop(
     iteration = 0
 
     while max_iterations <= 0 or iteration < max_iterations:
+        # Pre-fetch markets once per poll cycle (batched by category)
+        category_markets = _fetch_all_category_markets(gamma_url=gamma_url)
+
         stories = fetch_sentinel_stories(
             base_url=sentinel_url,
             api_key=sentinel_api_key,
+            limit=50,
         )
         for story in stories:
             process_story(
                 story=story,
-                gamma_base_url=gamma_url,
+                category_markets=category_markets,
                 min_relevance=min_relevance,
                 signal_path=signal_path,
                 emitted_story_ids=emitted_story_ids,
