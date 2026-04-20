@@ -157,6 +157,8 @@ def scan_unresolved_entries(jsonl_dir: Path) -> list[UnresolvedEntry]:
             continue
         if row.get("resolved") is True:
             continue
+        if row.get("accounting_status") != "open":
+            continue
         condition_id = row.get("condition_id", "")
         if not condition_id:
             instrument_id = row.get("instrument_id", "")
