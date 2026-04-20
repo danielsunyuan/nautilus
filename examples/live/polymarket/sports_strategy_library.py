@@ -134,6 +134,10 @@ def should_enter_sports_market(
       - ask must be >= preset.min_ask and < preset.max_ask
       - spread (ask - bid) must be <= preset.max_spread
       - ask_size must be >= preset.min_ask_size
+
+    Note: if ``sport`` or ``market_type`` is ``""`` (the default) and the
+    corresponding whitelist is non-None, the gate will always block.
+    Callers must supply the actual sport/market_type string.
     """
     # Sport whitelist
     if preset.allowed_sports is not None and sport not in preset.allowed_sports:

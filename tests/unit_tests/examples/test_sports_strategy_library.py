@@ -22,6 +22,15 @@ def _make_preset(**overrides):
     return SportsStrategyPreset(**{**defaults, **overrides})
 
 
+def test_empty_sport_blocks_when_whitelist_active():
+    """sport='' (default) must block when allowed_sports is set."""
+    preset = _make_preset(allowed_sports=frozenset({"tennis"}))
+    assert not should_enter_sports_market(
+        preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
+        # sport and market_type omitted — use defaults ("", "")
+    )
+
+
 def test_allowed_sports_blocks_wrong_sport():
     preset = _make_preset(allowed_sports=frozenset({"tennis"}))
     assert not should_enter_sports_market(
