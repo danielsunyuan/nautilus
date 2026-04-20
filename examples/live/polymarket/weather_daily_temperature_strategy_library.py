@@ -20,11 +20,49 @@ class WeatherTemperatureStrategyPreset:
     min_ask_size: float = 5.0
     order_qty: float = 10.0
     mode: str = "basic"
+    take_profit_price: float | None = None
+    stop_loss_price: float | None = None
 
 
 def daily_temperature_price_arena_presets() -> tuple[WeatherTemperatureStrategyPreset, ...]:
     """Return the canonical set of daily-temperature price-arena presets."""
     return (
+        # --- band-only arenas ---
+        WeatherTemperatureStrategyPreset(
+            name="temp_50c_band_only",
+            arena="temp_50c",
+            min_ask=0.50,
+            max_ask=0.60,
+            mode="band_only",
+        ),
+        WeatherTemperatureStrategyPreset(
+            name="temp_60c_band_only",
+            arena="temp_60c",
+            min_ask=0.60,
+            max_ask=0.70,
+            mode="band_only",
+        ),
+        WeatherTemperatureStrategyPreset(
+            name="temp_70c_band_only",
+            arena="temp_70c",
+            min_ask=0.70,
+            max_ask=0.80,
+            mode="band_only",
+        ),
+        WeatherTemperatureStrategyPreset(
+            name="temp_80c_band_only",
+            arena="temp_80c",
+            min_ask=0.80,
+            max_ask=0.90,
+            mode="band_only",
+        ),
+        WeatherTemperatureStrategyPreset(
+            name="temp_90c_band_only",
+            arena="temp_90c",
+            min_ask=0.90,
+            max_ask=0.981,
+            mode="band_only",
+        ),
         # --- basic arenas ---
         WeatherTemperatureStrategyPreset(
             name="temp_50c_basic",
@@ -54,7 +92,10 @@ def daily_temperature_price_arena_presets() -> tuple[WeatherTemperatureStrategyP
             name="temp_90c_basic",
             arena="temp_90c",
             min_ask=0.90,
-            max_ask=0.981,
+            max_ask=0.98,
+            max_spread=0.99,
+            take_profit_price=0.99,
+            stop_loss_price=0.75,
         ),
         # --- support arenas (basic + bid-side liquidity dominance) ---
         WeatherTemperatureStrategyPreset(
@@ -92,6 +133,10 @@ def should_enter_temperature_market(
     """
     Pure entry decision function.
 
+    For "band_only" mode:
+      - ask must be >= preset.min_ask and < preset.max_ask
+      - ignores spread and liquidity gates for measurement-only baseline runs
+
     For "basic" mode:
       - ask must be >= preset.min_ask and < preset.max_ask
         (for 90c arena, max_ask is 0.981 so ask <= 0.98 is captured)
@@ -106,6 +151,11 @@ def should_enter_temperature_market(
         return False
     if ask >= preset.max_ask:
         return False
+
+    # Measurement baseline: only the price band matters.
+    if preset.mode == "band_only":
+        return True
+
     if (ask - bid) > preset.max_spread:
         return False
     if ask_size < preset.min_ask_size:
