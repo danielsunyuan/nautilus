@@ -333,6 +333,62 @@ uv run --extra polymarket --with pytest --with pytest-asyncio python -m pytest \
   --noconftest -q
 ```
 
+## Sports Strategy Presets
+
+### Preset Sets
+
+Four preset sets are available, controlled by `--preset-set` flag passed to the daemon:
+
+| Set | Flag | Count | Description |
+|-----|------|-------|-------------|
+| `all` | `--preset-set all` | 10 | 5 band-only + 5 basic; undifferentiated baseline |
+| `focused` | `--preset-set focused` | 10 | 2 per arena × 5 arenas; sport+type whitelisted |
+| `depth-focused` | `--preset-set depth-focused` | 10 | Same as focused + `min_bid_ratio=0.55` |
+| `clv-focused` | `--preset-set clv-focused` | 10 | Same as focused + `min_clv_edge=0.05` (needs `THE_ODDS_API_KEY`) |
+
+### What `focused` Contains
+
+Two presets per arena (5 arenas = 10 total), `mode="basic"` (spread + liquidity filter):
+
+- `{arena}_focused_tennis_ufc` — `allowed_sports={"tennis", "ufc"}`, all market types
+- `{arena}_focused_nba_totals` — `allowed_sports={"nba"}`, `allowed_market_types={"totals"}`
+
+Excluded sports: MLB, NHL/hockey (negative edge in baseline). Excluded NBA market types: moneyline, spreads (negative edge in baseline).
+
+### What `depth-focused` Adds
+
+Copies every `focused` preset via `dataclasses.replace()`, adds `min_bid_ratio=0.55`. Entry requires bid-side book weight ≥ 55% of visible liquidity. Concept ported from BTC `microprice_support` strategy.
+
+### What `clv-focused` Adds
+
+Copies every `focused` preset, adds `min_clv_edge=0.05`. Entry requires Polymarket ask ≥ 5pp below Vegas implied probability. Requires `THE_ODDS_API_KEY`. If Vegas data is unavailable, gate passes through.
+
+**Known limitation (Apr 2026):** `SportsMarket` has no `home_team`/`away_team` fields. `fetch_implied_prob()` always receives empty strings and always returns `None`. `has_clv_edge(vegas_implied=None)` returns `True`, so `clv-focused` is currently operationally identical to `focused`. Do not run `clv-focused` in production until `SportsMarket` is extended.
+
+### Data Baseline (Apr 2026)
+
+Source: ~387 settled sports paper trades collected April 2026 across all 5 arenas.
+
+| Sport + Type | Win Rate | vs. Breakeven | n | Decision |
+|---|---|---|---|---|
+| Tennis (all) | 77.6% | +5.1pp | 326 | ✅ Whitelist |
+| UFC (all) | 90.2% | +13.2pp | 41 | ✅ Whitelist |
+| NBA totals | 80.0% | +28.7pp | 20 | ✅ Whitelist |
+| NBA spreads | ~40% | −20pp | est. | ❌ Exclude |
+| MLB (all) | negative | negative | est. | ❌ Exclude |
+| NHL/hockey | negative | negative | est. | ❌ Exclude |
+
+Gate before drawing conclusions: **≥200 unique settled trades** per preset set before evaluating.
+
+### How to Add a New Preset Set
+
+1. Add a new factory function to `sports_strategy_library.py` following the `focused_presets()` / `depth_focused_presets()` pattern.
+2. Use `dataclasses.replace()` to copy existing presets (NOT `vars()` — `slots=True` dataclasses have no `__dict__`).
+3. Add a route in `_strategy_presets_for_set()` in `polymarket_sports_paper_daemon.py`.
+4. Add a new Docker service in `.docker/docker-compose.yml` with `--preset-set <name>` and `outputs/polymarket/sports` volume mount.
+5. Add tests in `tests/unit_tests/examples/test_sports_strategy_library.py` verifying count, field values, and whitelist inheritance.
+6. Update this section with what the new set contains and its rationale.
+
 ## Win Rate Math
 
 ```
