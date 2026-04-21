@@ -205,9 +205,30 @@ def _strategy_presets_for_set(
         return depth_focused_presets()
     if normalized == "clv-focused":
         return clv_focused_presets()
+    if normalized == "live-sim":
+        return focused_presets()
     if normalized == "smoke":
         return (all_presets[0],)
     raise ValueError(f"unsupported preset set {preset_set!r}")
+
+
+def _budget_config_for_preset_set(preset_set: str) -> dict[str, Any]:
+    """Return per-strategy budget/portfolio constraints for a given preset set.
+
+    live-sim: simulates deploying $50 real money.  $2 target per position,
+    capped at 25 open positions and $50 total stake.  Designed to run
+    alongside the observation daemons without interfering.
+    """
+    normalized = str(preset_set).strip().lower()
+    if normalized == "live-sim":
+        return {
+            "target_usd_per_market": Decimal("2"),
+            "min_order_size_shares": Decimal("1"),
+            "max_stake_per_market": Decimal("5"),
+            "max_open_positions": 25,
+            "max_total_open_stake": Decimal("50"),
+        }
+    return {}
 
 
 def build_daemon_node_config(
@@ -566,6 +587,7 @@ async def _default_run_round(
     preset_set: str,
 ) -> list[dict[str, Any]]:
     presets = _strategy_presets_for_set(preset_set)
+    budget = _budget_config_for_preset_set(preset_set)
 
     # Pre-fetch Vegas implied probs (only if any preset has min_clv_edge set)
     vegas_cache: dict[str, float | None] = {}
@@ -621,6 +643,11 @@ async def _default_run_round(
                     game_time=market.game_time,
                     vegas_implied=vegas_cache.get(f"{market.slug}:{market.outcome_name}"),
                     family_instrument_ids=family_inst_ids,
+                    target_usd_per_market=budget.get("target_usd_per_market"),
+                    min_order_size_shares=budget.get("min_order_size_shares", Decimal("0")),
+                    max_stake_per_market=budget.get("max_stake_per_market"),
+                    max_open_positions=budget.get("max_open_positions"),
+                    max_total_open_stake=budget.get("max_total_open_stake"),
                 ),
             )
             node.trader.add_strategy(strategy)
