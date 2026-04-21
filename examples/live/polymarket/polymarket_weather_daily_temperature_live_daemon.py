@@ -644,6 +644,165 @@ def _already_entered_today(output_dir: Path, session_trading_day) -> set[str]:
     return slugs
 
 
+def _build_clob_client_for_entry():
+    """Build a py_clob_client ClobClient for order submission."""
+    from py_clob_client.client import ClobClient
+    from py_clob_client.constants import POLYGON
+    from py_clob_client.clob_types import ApiCreds
+    host = os.environ.get("POLYMARKET_CLOB_HOST", "https://clob.polymarket.com")
+    pk = os.environ["POLYMARKET_PRIVATE_KEY"]
+    funder = os.environ["POLYMARKET_FUNDER_ADDRESS"]
+    sig_type = int(os.environ.get("POLYMARKET_SIGNATURE_TYPE", "0"))
+    client = ClobClient(host, chain_id=POLYGON, key=pk, funder=funder, signature_type=sig_type)
+    api_key = os.environ.get("POLYMARKET_CLOB_API_KEY", "")
+    api_secret = os.environ.get("POLYMARKET_CLOB_API_SECRET", "")
+    passphrase = os.environ.get("POLYMARKET_CLOB_PASSPHRASE", "")
+    if not (api_key and api_secret and passphrase):
+        creds = client.create_or_derive_api_creds()
+        api_key, api_secret, passphrase = creds.api_key, creds.api_secret, creds.api_passphrase
+    client.set_api_creds(ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=passphrase))
+    return client
+
+
+def _token_id_from_market(market: "DailyTemperatureMarket") -> str:
+    """Extract the YES token_id from a DailyTemperatureMarket's instrument-like data."""
+    # instrument_id format: {condition_id}-{token_id}.POLYMARKET
+    return market.yes_token_id if hasattr(market, "yes_token_id") else ""
+
+
+async def _run_direct_clob_entry_session(
+    *,
+    markets: list["DailyTemperatureMarket"],
+    writer: "JsonlRunWriter",
+    run_id: str,
+    now_fn: Callable[[], datetime],
+    session_end_time: datetime,
+    session_stake_cap: "Decimal | None" = None,
+) -> None:
+    """
+    Enter qualifying markets directly via py_clob_client — no TradingNode required.
+
+    For each market whose CLOB mid price is in [0.90, 0.99] (and not already entered
+    in this session), submits a $2 FOK BUY market order and writes a strategy_result
+    event.  After exhausting the candidate list, sleeps until session_end_time.
+
+    This replaces _run_continuous_session for the live daemon because the Nautilus
+    TradingNode.build() blocks the Rust event loop on futex calls that SIGALRM cannot
+    interrupt, causing an unrecoverable hang when loading >~5 instruments.
+    """
+    import httpx as _httpx
+    from decimal import Decimal as _Dec
+    from py_clob_client.clob_types import MarketOrderArgs, OrderType
+    from py_clob_client.order_builder.constants import BUY
+
+    TARGET_USD = _Dec("2")
+    MIN_ASK = 0.90
+    MAX_ASK = 0.99
+    TP_PRICE = 0.99
+    SL_PRICE = 0.85
+
+    clob_host = os.environ.get("POLYMARKET_CLOB_HOST", "https://clob.polymarket.com")
+    budget_remaining = session_stake_cap if session_stake_cap is not None else _Dec("50")
+
+    try:
+        clob_client = await asyncio.to_thread(_build_clob_client_for_entry)
+    except Exception as exc:
+        _log.error("Failed to build CLOB client: %s", exc)
+        raise RecoverableDaemonError(f"CLOB client build failed: {exc}") from exc
+
+    entered_this_session: set[str] = set()
+
+    async with _httpx.AsyncClient(timeout=10.0) as http:
+        for market in markets:
+            if now_fn() >= session_end_time:
+                break
+            if budget_remaining <= _Dec("0"):
+                _log.info("Session budget exhausted, stopping entries.")
+                break
+
+            slug = market.slug
+
+            token_id = getattr(market, "yes_token_id", "") or ""
+            if not token_id:
+                _log.warning("No yes_token_id for %s — skipping", slug)
+                continue
+
+            # Fetch live mid from CLOB
+            try:
+                resp = await http.get(f"{clob_host}/midpoint?token_id={token_id}")
+                mid = float(resp.json().get("mid", 0) or 0)
+            except Exception as exc:
+                _log.warning("CLOB midpoint fetch failed for %s: %s", slug, exc)
+                continue
+
+            if not (MIN_ASK <= mid <= MAX_ASK):
+                _log.info("SKIP %s  mid=%.4f (outside [%.2f, %.2f])", slug, mid, MIN_ASK, MAX_ASK)
+                continue
+
+            # Shares to buy = $2 / mid, rounded down to 4dp
+            raw_shares = TARGET_USD / _Dec(str(mid))
+            shares = raw_shares.quantize(_Dec("0.0001"))
+            stake = (shares * _Dec(str(mid))).quantize(_Dec("0.0001"))
+
+            if budget_remaining < stake:
+                _log.info("SKIP %s  stake=%.4f > remaining=%.4f", slug, float(stake), float(budget_remaining))
+                continue
+
+            _log.info("ENTER %s  mid=%.4f  shares=%.4f  stake=%.4f", slug, mid, float(shares), float(stake))
+
+            try:
+                order_args = MarketOrderArgs(token_id=token_id, amount=float(shares), side=BUY)
+                signed_order = await asyncio.to_thread(clob_client.create_market_order, order_args)
+                resp_order = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
+                _log.info("ORDER resp: %s", resp_order)
+            except Exception as exc:
+                _log.error("BUY FAILED for %s: %s", slug, exc)
+                continue
+
+            # Build instrument_id string matching the Nautilus convention: {cond_id}-{token_id}.POLYMARKET
+            cond_id = getattr(market, "condition_id", "") or ""
+            instrument_id_str = f"{cond_id}-{token_id}.POLYMARKET"
+
+            writer.write({
+                "run_id": run_id,
+                "event": "strategy_result",
+                "asset_class": "weather",
+                "weather_market_type": "daily_temperature",
+                "preset_name": "temp_90c_basic",
+                "arena": "temp_90c",
+                "mode": "basic",
+                "market_slug": slug,
+                "city": getattr(market, "city", ""),
+                "observation_date": str(getattr(market, "observation_date", "")),
+                "threshold_f": getattr(market, "threshold_f", None),
+                "metric": getattr(market, "metric", "high"),
+                "token_side": "yes",
+                "instrument_id": instrument_id_str,
+                "entry_price": mid,
+                "shares": float(shares),
+                "stake": float(stake),
+                "accounting_status": "open",
+                "resolved": False,
+                "exit_reason": "position_open",
+                "entry_time": now_fn().isoformat(),
+                "exit_time": None,
+                "pnl": None,
+                "stop_loss_price": SL_PRICE,
+                "take_profit_price": TP_PRICE,
+                "timestamp": now_fn().isoformat(),
+                "clob_response": str(resp_order),
+            })
+
+            entered_this_session.add(slug)
+            budget_remaining -= stake
+            _log.info("Entered %s  remaining_budget=%.4f", slug, float(budget_remaining))
+
+    # Sleep until session boundary
+    sleep_secs = max((session_end_time - now_fn()).total_seconds(), 0)
+    _log.info("All entries done. Sleeping %.0fs until session boundary.", sleep_secs)
+    await asyncio.sleep(sleep_secs)
+
+
 async def _run_continuous_session(
     *,
     markets: list[DailyTemperatureMarket],
@@ -881,6 +1040,22 @@ async def _run_main_loop(
             )
         ]
 
+        # Hard cap: node.build() makes sequential CLOB API calls for every instrument.
+        # Loading >~15 instruments takes so long it blocks the Rust event loop past
+        # SIGALRM's reach, causing an unrecoverable hang.  Sort by best-ask proximity
+        # to the take-profit band (0.99) — highest-probability markets first — and cap
+        # at MAX_MARKETS_PER_SESSION.  Remaining markets will be picked up in the next
+        # session cycle after the session boundary rolls.
+        _MAX_MARKETS_PER_SESSION = 12
+        if len(tradeable) > _MAX_MARKETS_PER_SESSION:
+            def _sort_key(m):
+                ask = m.best_ask
+                if ask is None:
+                    return 1.0  # no price info: lowest priority
+                return abs(ask - 0.99)  # closest to take-profit first
+            tradeable = sorted(tradeable, key=_sort_key)[:_MAX_MARKETS_PER_SESSION]
+            _log.info("Capped tradeable markets to %d (sorted by proximity to 0.99)", _MAX_MARKETS_PER_SESSION)
+
         # Markets with open positions that should be monitored for stop-loss/take-profit.
         # Use local date here too so we don't drop monitoring for cities whose local date
         # differs from the session trading day.
@@ -923,29 +1098,18 @@ async def _run_main_loop(
         })
 
         try:
-            await asyncio.wait_for(
-                _run_continuous_session(
-                    markets=tradeable,
-                    monitoring_markets=open_position_markets,
-                    preset_set=preset_set,
-                    writer=writer,
-                    run_id=run_id,
-                    now_fn=now_fn,
-                    session_end_time=next_session_boundary,
-                    session_stake_cap=remaining,
-                ),
-                timeout=session_timeout_secs,
+            # Direct CLOB entry: bypasses TradingNode.build() which hangs indefinitely
+            # because the Rust thread pool blocks on futex calls that SIGALRM cannot
+            # interrupt.  _run_direct_clob_entry_session uses py_clob_client directly —
+            # the same path the take-profit watcher uses for sells.
+            await _run_direct_clob_entry_session(
+                markets=tradeable,
+                writer=writer,
+                run_id=run_id,
+                now_fn=now_fn,
+                session_end_time=next_session_boundary,
+                session_stake_cap=remaining,
             )
-        except asyncio.TimeoutError:
-            writer.write({
-                "run_id": run_id,
-                "event": "error",
-                "asset_class": "weather",
-                "weather_market_type": "daily_temperature",
-                "preset_set": preset_set,
-                "reason": f"session timed out after {session_timeout_secs:.0f}s",
-                "timestamp": now_fn().isoformat(),
-            })
         except RecoverableDaemonError as exc:
             writer.write({
                 "run_id": run_id,
