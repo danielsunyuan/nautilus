@@ -129,13 +129,15 @@ def _live_jsonl_files(jsonl_dir: Path) -> list[Path]:
     """Return all JSONL files that belong to the live weather ledger.
 
     Includes ``weather_temp_live_*.jsonl`` (entry records written by the daemon),
-    ``settlement_live.jsonl`` (settlement_update records written by this script),
-    and ``take_profit.jsonl`` (settlement_update records written by the take-profit
-    watcher when a position is exited early via take-profit or stop-loss).
-    Paper trade files (``overnight_*``, ``weather_temp_all_*``, the old
-    ``settlement.jsonl``, etc.) are excluded.
+    ``weather_confirmed_live_*.jsonl`` (confirmed-entry records written by the
+    confirmed-entry daemon), ``settlement_live.jsonl`` (settlement_update records
+    written by this script), and ``take_profit.jsonl`` (settlement_update records
+    written by the take-profit watcher when a position is exited early via
+    take-profit or stop-loss). Paper trade files (``overnight_*``,
+    ``weather_temp_all_*``, the old ``settlement.jsonl``, etc.) are excluded.
     """
     files = sorted(jsonl_dir.glob("weather_temp_live_*.jsonl"))
+    files += sorted(jsonl_dir.glob("weather_confirmed_live_*.jsonl"))
     for extra_name in ("settlement_live.jsonl", "take_profit.jsonl"):
         extra_file = jsonl_dir / extra_name
         if extra_file.exists():

@@ -682,9 +682,12 @@ async def _run_direct_clob_entry_session(
     """
     Enter qualifying markets directly via py_clob_client — no TradingNode required.
 
-    For each market whose CLOB mid price is in [0.90, 0.99] (and not already entered
-    in this session), submits a $2 FOK BUY market order and writes a strategy_result
-    event.  After exhausting the candidate list, sleeps until session_end_time.
+    Two passes are made per session:
+      1. YES tokens whose CLOB mid is in [0.90, 0.99]  (temp_90c_basic)
+      2. NO  tokens whose CLOB mid is in [0.90, 0.98]  (temp_90c_no_basic)
+
+    For each qualifying market, submits a $2 FOK BUY market order and writes a
+    strategy_result event.  After both passes, sleeps until session_end_time.
 
     This replaces _run_continuous_session for the live daemon because the Nautilus
     TradingNode.build() blocks the Rust event loop on futex calls that SIGALRM cannot
@@ -696,10 +699,12 @@ async def _run_direct_clob_entry_session(
     from py_clob_client.order_builder.constants import BUY
 
     TARGET_USD = _Dec("2")
-    MIN_ASK = 0.90
-    MAX_ASK = 0.99
-    TP_PRICE = 0.99
-    SL_PRICE = 0.85
+
+    # (token_side, token_id_attr, min_ask, max_ask, tp_price, sl_price, preset_name, arena)
+    ENTRY_PASSES = [
+        ("yes", "yes_token_id", 0.90, 0.99, 0.99, 0.85, "temp_90c_basic",    "temp_90c"),
+        ("no",  "no_token_id",  0.90, 0.98, 0.99, 0.85, "temp_90c_no_basic", "temp_90c_no"),
+    ]
 
     clob_host = os.environ.get("POLYMARKET_CLOB_HOST", "https://clob.polymarket.com")
     budget_remaining = session_stake_cap if session_stake_cap is not None else _Dec("50")
@@ -710,92 +715,104 @@ async def _run_direct_clob_entry_session(
         _log.error("Failed to build CLOB client: %s", exc)
         raise RecoverableDaemonError(f"CLOB client build failed: {exc}") from exc
 
-    entered_this_session: set[str] = set()
+    # Track (slug, side) so a restart won't re-enter the same side twice.
+    entered_this_session: set[tuple[str, str]] = set()
 
     async with _httpx.AsyncClient(timeout=10.0) as http:
-        for market in markets:
+        for (side, token_attr, min_ask, max_ask, tp_price, sl_price, preset_name, arena) in ENTRY_PASSES:
             if now_fn() >= session_end_time:
                 break
             if budget_remaining <= _Dec("0"):
                 _log.info("Session budget exhausted, stopping entries.")
                 break
 
-            slug = market.slug
+            _log.info("Entry pass: side=%s  band=[%.2f, %.2f]  preset=%s", side, min_ask, max_ask, preset_name)
 
-            token_id = getattr(market, "yes_token_id", "") or ""
-            if not token_id:
-                _log.warning("No yes_token_id for %s — skipping", slug)
-                continue
+            for market in markets:
+                if now_fn() >= session_end_time:
+                    break
+                if budget_remaining <= _Dec("0"):
+                    _log.info("Session budget exhausted, stopping entries.")
+                    break
 
-            # Fetch live mid from CLOB
-            try:
-                resp = await http.get(f"{clob_host}/midpoint?token_id={token_id}")
-                mid = float(resp.json().get("mid", 0) or 0)
-            except Exception as exc:
-                _log.warning("CLOB midpoint fetch failed for %s: %s", slug, exc)
-                continue
+                slug = market.slug
+                if (slug, side) in entered_this_session:
+                    continue
 
-            if not (MIN_ASK <= mid <= MAX_ASK):
-                _log.info("SKIP %s  mid=%.4f (outside [%.2f, %.2f])", slug, mid, MIN_ASK, MAX_ASK)
-                continue
+                token_id = getattr(market, token_attr, "") or ""
+                if not token_id:
+                    _log.warning("No %s for %s — skipping", token_attr, slug)
+                    continue
 
-            # Shares to buy = $2 / mid, rounded down to 4dp
-            raw_shares = TARGET_USD / _Dec(str(mid))
-            shares = raw_shares.quantize(_Dec("0.0001"))
-            stake = (shares * _Dec(str(mid))).quantize(_Dec("0.0001"))
+                # Fetch live mid from CLOB
+                try:
+                    resp = await http.get(f"{clob_host}/midpoint?token_id={token_id}")
+                    mid = float(resp.json().get("mid", 0) or 0)
+                except Exception as exc:
+                    _log.warning("CLOB midpoint fetch failed for %s (%s): %s", slug, side, exc)
+                    continue
 
-            if budget_remaining < stake:
-                _log.info("SKIP %s  stake=%.4f > remaining=%.4f", slug, float(stake), float(budget_remaining))
-                continue
+                if not (min_ask <= mid <= max_ask):
+                    _log.info("SKIP %s [%s]  mid=%.4f (outside [%.2f, %.2f])", slug, side, mid, min_ask, max_ask)
+                    continue
 
-            _log.info("ENTER %s  mid=%.4f  shares=%.4f  stake=%.4f", slug, mid, float(shares), float(stake))
+                # Shares to buy = $2 / mid, rounded down to 4dp
+                raw_shares = TARGET_USD / _Dec(str(mid))
+                shares = raw_shares.quantize(_Dec("0.0001"))
+                stake = (shares * _Dec(str(mid))).quantize(_Dec("0.0001"))
 
-            try:
-                order_args = MarketOrderArgs(token_id=token_id, amount=float(shares), side=BUY)
-                signed_order = await asyncio.to_thread(clob_client.create_market_order, order_args)
-                resp_order = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
-                _log.info("ORDER resp: %s", resp_order)
-            except Exception as exc:
-                _log.error("BUY FAILED for %s: %s", slug, exc)
-                continue
+                if budget_remaining < stake:
+                    _log.info("SKIP %s [%s]  stake=%.4f > remaining=%.4f", slug, side, float(stake), float(budget_remaining))
+                    continue
 
-            # Build instrument_id string matching the Nautilus convention: {cond_id}-{token_id}.POLYMARKET
-            cond_id = getattr(market, "condition_id", "") or ""
-            instrument_id_str = f"{cond_id}-{token_id}.POLYMARKET"
+                _log.info("ENTER %s [%s]  mid=%.4f  shares=%.4f  stake=%.4f", slug, side, mid, float(shares), float(stake))
 
-            writer.write({
-                "run_id": run_id,
-                "event": "strategy_result",
-                "asset_class": "weather",
-                "weather_market_type": "daily_temperature",
-                "preset_name": "temp_90c_basic",
-                "arena": "temp_90c",
-                "mode": "basic",
-                "market_slug": slug,
-                "city": getattr(market, "city", ""),
-                "observation_date": str(getattr(market, "observation_date", "")),
-                "threshold_f": getattr(market, "threshold_f", None),
-                "metric": getattr(market, "metric", "high"),
-                "token_side": "yes",
-                "instrument_id": instrument_id_str,
-                "entry_price": mid,
-                "shares": float(shares),
-                "stake": float(stake),
-                "accounting_status": "open",
-                "resolved": False,
-                "exit_reason": "position_open",
-                "entry_time": now_fn().isoformat(),
-                "exit_time": None,
-                "pnl": None,
-                "stop_loss_price": SL_PRICE,
-                "take_profit_price": TP_PRICE,
-                "timestamp": now_fn().isoformat(),
-                "clob_response": str(resp_order),
-            })
+                try:
+                    order_args = MarketOrderArgs(token_id=token_id, amount=float(shares), side=BUY)
+                    signed_order = await asyncio.to_thread(clob_client.create_market_order, order_args)
+                    resp_order = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
+                    _log.info("ORDER resp: %s", resp_order)
+                except Exception as exc:
+                    _log.error("BUY FAILED for %s [%s]: %s", slug, side, exc)
+                    continue
 
-            entered_this_session.add(slug)
-            budget_remaining -= stake
-            _log.info("Entered %s  remaining_budget=%.4f", slug, float(budget_remaining))
+                # Build instrument_id string matching the Nautilus convention: {cond_id}-{token_id}.POLYMARKET
+                cond_id = getattr(market, "condition_id", "") or ""
+                instrument_id_str = f"{cond_id}-{token_id}.POLYMARKET"
+
+                writer.write({
+                    "run_id": run_id,
+                    "event": "strategy_result",
+                    "asset_class": "weather",
+                    "weather_market_type": "daily_temperature",
+                    "preset_name": preset_name,
+                    "arena": arena,
+                    "mode": "basic",
+                    "market_slug": slug,
+                    "city": getattr(market, "city", ""),
+                    "observation_date": str(getattr(market, "observation_date", "")),
+                    "threshold_f": getattr(market, "threshold_f", None),
+                    "metric": getattr(market, "metric", "high"),
+                    "token_side": side,
+                    "instrument_id": instrument_id_str,
+                    "entry_price": mid,
+                    "shares": float(shares),
+                    "stake": float(stake),
+                    "accounting_status": "open",
+                    "resolved": False,
+                    "exit_reason": "position_open",
+                    "entry_time": now_fn().isoformat(),
+                    "exit_time": None,
+                    "pnl": None,
+                    "stop_loss_price": sl_price,
+                    "take_profit_price": tp_price,
+                    "timestamp": now_fn().isoformat(),
+                    "clob_response": str(resp_order),
+                })
+
+                entered_this_session.add((slug, side))
+                budget_remaining -= stake
+                _log.info("Entered %s [%s]  remaining_budget=%.4f", slug, side, float(budget_remaining))
 
     # Sleep until session boundary
     sleep_secs = max((session_end_time - now_fn()).total_seconds(), 0)

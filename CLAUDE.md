@@ -82,6 +82,8 @@ The weather daemon lifecycle has three phases:
 
 Phase 2 is orchestration-only — it does not use Nautilus TradingNode. It reads JSONL + queries Gamma API. This respects the boundary: Nautilus handles order flow, the daemon handles lifecycle.
 
+**Confirmed-entry daemon** (`weather_confirmed_entry_daemon.py`): A fourth component that runs independently, polling Wunderground every 300–900s. Executes confirmed-outcome trades (A1: or_higher YES, A2: exact-band NO, B2: late-day NO). Output: `weather_confirmed_live_*.jsonl` — picked up automatically by settlement poller and take-profit watcher.
+
 ## CRITICAL: Polymarket Resolution Mechanism
 
 **Every decision involving a Polymarket position — entry, exit, hold, P&L assessment — must account for how that specific market resolves.**
@@ -251,6 +253,7 @@ Two images are used:
 | `papertrade-daemon-vpn` | `nautilus-papertrade-daemon-vpn` | `nautilus-papertrade:latest` | 5m BTC paper daemon via NordVPN |
 | `weather-daemon-vpn` | `nautilus-weather-daemon-vpn` | `nautilus-papertrade:latest` | Weather paper daemon via NordVPN |
 | `weather-live-daemon-vpn` | `nautilus-weather-live-daemon-vpn` | `nautilus-recorder:latest` | Weather live daemon (90c, $50 budget) |
+| `weather-confirmed-entry-vpn` | `nautilus-weather-confirmed-vpn` | `nautilus-recorder:latest` | Confirmed-entry daemon (WU temp signal, $20/day budget) |
 | `weather-exit-server-vpn` | `nautilus-weather-exit-server` | `nautilus-recorder:latest` | Manual exit HTTP server (port 8080) |
 | `weather-settlement-vpn` | `nautilus-weather-settlement-vpn` | `nautilus-papertrade:latest` | Weather settlement poller (CLOB, 900s) |
 | `sports-daemon-vpn` | `nautilus-sports-daemon-vpn` | `nautilus-papertrade:latest` | Sports paper daemon via NordVPN |

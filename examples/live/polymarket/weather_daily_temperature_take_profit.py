@@ -138,6 +138,7 @@ def load_open_positions(jsonl_dir: Path) -> dict[str, PositionWatch]:
     # take-profit exits).  The old paper-trade files and settlement archive are
     # excluded to avoid false-positive resolved_tokens matches.
     live_files: list[Path] = sorted(jsonl_dir.glob("weather_temp_live_*.jsonl"))
+    live_files += sorted(jsonl_dir.glob("weather_confirmed_live_*.jsonl"))
     for extra in ("settlement_live.jsonl", "take_profit.jsonl"):
         p = jsonl_dir / extra
         if p.exists():

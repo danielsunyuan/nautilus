@@ -803,6 +803,39 @@ services:
       - --capital-budget
       - "50"
 
+  weather-confirmed-entry-vpn:
+    container_name: nautilus-weather-confirmed-vpn
+    profiles: ["vpn", "execution"]
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile.recorder
+    image: nautilus-recorder:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    working_dir: /workspace/nautilus
+    env_file:
+      - path: ../.env.polymarket
+        required: false
+    environment:
+      PYTHONPATH: "/app"
+      TWC_API_KEY: "${TWC_API_KEY:-}"
+    volumes:
+      - ..:/workspace/nautilus
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    command: >
+      python3 examples/live/polymarket/weather_confirmed_entry_daemon.py
+      --budget 20
+      --output-dir /workspace/nautilus/outputs
+
   # ---------------------------------------------------------------------------
   # Exit server — exposes HTTP on port 8080 inside nordvpn network namespace.
   # Use: docker exec nautilus-nordvpn wget -qO- http://127.0.0.1:8080/positions

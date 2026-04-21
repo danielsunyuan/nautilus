@@ -113,3 +113,50 @@ PY
 - Output: Latency/readiness module or report definitions and tests for timing semantics, disconnect handling, and kill-switch assumptions.
 - Validation:
   - uv run python -m pytest --noconftest tests/unit_tests/examples/test_polymarket_crypto_5m_readiness.py -q
+
+### TASK-011: Weather confirmed-entry signal evaluator
+
+- Description: Pure-function signal module (`weather_confirmed_signal.py`) with A1/A2/B2 evaluators, data quality guards (freshness, spike filter), two-poll ConfirmTracker, and `build_signal` market+obs→signal function.
+- Plan: docs/plans/2026-04-22-weather-confirmed-entry-daemon.md (Tasks 1–4)
+- Agent Type: Python / strategy
+- Status: Completed ✅ (27/27 tests passing)
+- Dependencies: TASK-010
+- Output: `examples/live/polymarket/weather_confirmed_signal.py` + 27 unit tests passing
+- Validation:
+  - uv run --extra polymarket --with pytest python -m pytest tests/unit_tests/examples/test_weather_confirmed_signal.py -v
+
+### TASK-012: Weather confirmed-entry daemon
+
+- Description: Main daemon (`weather_confirmed_entry_daemon.py`) — adaptive WU polling loop, market matching, CLOB execution, JSONL output compatible with settlement + take-profit watchers.
+- Plan: docs/plans/2026-04-22-weather-confirmed-entry-daemon.md (Tasks 5–6)
+- Agent Type: Python / async / execution
+- Status: Completed ✅ (compiles + 8/8 tests passing)
+- Dependencies: TASK-011
+- Output: `examples/live/polymarket/weather_confirmed_entry_daemon.py` + daemon unit tests passing
+- Validation:
+  - uv run --extra polymarket --with pytest --with pytest-asyncio python -m pytest tests/unit_tests/examples/test_weather_confirmed_entry_daemon.py --noconftest -v
+  - python3 -m py_compile examples/live/polymarket/weather_confirmed_entry_daemon.py
+
+### TASK-013: Wire settlement + take-profit watcher to confirmed entries
+
+- Description: Update `_live_jsonl_files()` in settlement and `load_open_positions()` in take-profit watcher to include `weather_confirmed_live_*.jsonl` files.
+- Plan: docs/plans/2026-04-22-weather-confirmed-entry-daemon.md (Task 7)
+- Agent Type: Python
+- Status: Completed ✅
+- Dependencies: TASK-012
+- Output: Settlement and take-profit watcher automatically pick up confirmed entries
+- Validation:
+  - grep -n "weather_confirmed_live" examples/live/polymarket/weather_daily_temperature_settlement.py
+  - grep -n "weather_confirmed_live" examples/live/polymarket/weather_daily_temperature_take_profit.py
+
+### TASK-014: Docker service + CLAUDE.md docs for confirmed-entry daemon
+
+- Description: Add `weather-confirmed-entry-vpn` service to docker-compose.yml with $20 daily budget, and update CLAUDE.md service table + settlement architecture section.
+- Plan: docs/plans/2026-04-22-weather-confirmed-entry-daemon.md (Tasks 8–9)
+- Agent Type: DevOps / docs
+- Status: Completed ✅
+- Dependencies: TASK-013
+- Output: Running container + updated docs
+- Validation:
+  - grep -n "weather-confirmed-entry-vpn" .docker/docker-compose.yml
+  - grep -n "confirmed" CLAUDE.md
