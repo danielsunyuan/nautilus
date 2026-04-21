@@ -77,6 +77,8 @@ class DailyTemperatureMarket:
     no_token_id: str
     active: bool
     accepting_orders: bool
+    best_ask: float | None = None  # YES token best ask from Gamma (None if unavailable)
+    band_type: str = "or_higher"  # "exact" | "or_higher" | "or_lower"
 
 
 def _extract_tokens(tokens: list[dict]) -> tuple[str, str] | None:
@@ -160,7 +162,20 @@ def parse_daily_temperature_market(
             return None
 
         threshold = float(threshold_str)
-        # Store threshold in original unit, record the unit
+
+        # Derive band_type from qualifier group
+        qualifier = (match.group(5) or "").lower()
+        if qualifier in ("higher", "above"):
+            band_type = "or_higher"
+        elif qualifier in ("lower", "below"):
+            band_type = "or_lower"
+        else:
+            band_type = "exact"  # no qualifier → exact band (e.g. "be 16°C")
+
+        try:
+            best_ask: float | None = float(gamma_market["bestAsk"]) if gamma_market.get("bestAsk") is not None else None
+        except (ValueError, TypeError):
+            best_ask = None
         return DailyTemperatureMarket(
             slug=gamma_market.get("slug", ""),
             condition_id=gamma_market.get("condition_id") or gamma_market.get("conditionId", ""),
@@ -172,6 +187,8 @@ def parse_daily_temperature_market(
             no_token_id=no_token_id,
             active=bool(gamma_market.get("active", False)),
             accepting_orders=bool(gamma_market.get("accepting_orders") or gamma_market.get("acceptingOrders", False)),
+            best_ask=best_ask,
+            band_type=band_type,
         )
 
     # Try legacy pattern (original assumed format)
@@ -189,6 +206,8 @@ def parse_daily_temperature_market(
         except ValueError:
             return None
 
+        direction = _direction.lower()
+        band_type = "or_higher" if direction in ("above",) else "or_lower"
         return DailyTemperatureMarket(
             slug=gamma_market.get("slug", ""),
             condition_id=gamma_market.get("condition_id") or gamma_market.get("conditionId", ""),
@@ -200,6 +219,8 @@ def parse_daily_temperature_market(
             no_token_id=no_token_id,
             active=bool(gamma_market.get("active", False)),
             accepting_orders=bool(gamma_market.get("accepting_orders") or gamma_market.get("acceptingOrders", False)),
+            best_ask=float(gamma_market["bestAsk"]) if gamma_market.get("bestAsk") is not None else None,
+            band_type=band_type,
         )
 
     return None

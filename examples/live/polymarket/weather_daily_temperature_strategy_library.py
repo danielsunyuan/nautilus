@@ -20,6 +20,7 @@ class WeatherTemperatureStrategyPreset:
     min_ask_size: float = 5.0
     order_qty: float = 10.0
     mode: str = "basic"
+    token_side: str = "yes"  # "yes" or "no"
     take_profit_price: float | None = None
     stop_loss_price: float | None = None
 
@@ -93,7 +94,16 @@ def daily_temperature_price_arena_presets() -> tuple[WeatherTemperatureStrategyP
             arena="temp_90c",
             min_ask=0.90,
             max_ask=0.98,
-            max_spread=0.99,
+            take_profit_price=0.99,
+            stop_loss_price=0.75,
+        ),
+        # --- NO-side arena: buy NO token when market is near-certain NO ---
+        WeatherTemperatureStrategyPreset(
+            name="temp_90c_no_basic",
+            arena="temp_90c_no",
+            min_ask=0.90,
+            max_ask=0.98,
+            token_side="no",
             take_profit_price=0.99,
             stop_loss_price=0.75,
         ),

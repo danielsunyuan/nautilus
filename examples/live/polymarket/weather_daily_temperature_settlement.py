@@ -126,11 +126,16 @@ class JsonlRunWriter:
 # ---------------------------------------------------------------------------
 
 def _read_all_jsonl_rows(jsonl_dir: Path) -> list[tuple[str, dict]]:
-    """Read all rows from all JSONL files in directory. Returns (filename, row) tuples."""
+    """Read rows from live-trade JSONL files only. Returns (filename, row) tuples.
+
+    Only files matching ``weather_temp_live_*.jsonl`` are read so that paper
+    trade files (e.g. ``overnight_*``, ``weather_temp_all_*``) are never mixed
+    into the live settlement ledger.
+    """
     results: list[tuple[str, dict]] = []
     if not jsonl_dir.exists():
         return results
-    for jsonl_file in sorted(jsonl_dir.glob("*.jsonl")):
+    for jsonl_file in sorted(jsonl_dir.glob("weather_temp_live_*.jsonl")):
         try:
             with jsonl_file.open("r", encoding="utf-8") as fh:
                 for line in fh:
@@ -604,7 +609,7 @@ def _refresh_report(jsonl_dir: Path, report_md_path: str) -> None:
         return
 
     all_rows: list[dict] = []
-    for jsonl_file in sorted(jsonl_dir.glob("*.jsonl")):
+    for jsonl_file in sorted(jsonl_dir.glob("weather_temp_live_*.jsonl")):
         try:
             with jsonl_file.open("r", encoding="utf-8") as fh:
                 for line in fh:

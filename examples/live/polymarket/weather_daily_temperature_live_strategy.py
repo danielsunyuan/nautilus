@@ -7,6 +7,7 @@ import sys
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.data import QuoteTick
+from nautilus_trader.model.data import DataType
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
@@ -29,6 +30,21 @@ except ModuleNotFoundError:
     WeatherTemperatureStrategyPreset = module.WeatherTemperatureStrategyPreset
     should_enter_temperature_market = module.should_enter_temperature_market
 
+try:
+    from examples.live.polymarket.weather_temperature_data_client import (
+        TemperatureUpdate,
+    )
+except ModuleNotFoundError:
+    module_name = "examples.live.polymarket.weather_temperature_data_client"
+    module_path = Path(__file__).resolve().with_name("weather_temperature_data_client.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    TemperatureUpdate = module.TemperatureUpdate
+
 
 class WeatherDailyTemperaturePaperStrategyConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
@@ -41,6 +57,11 @@ class WeatherDailyTemperaturePaperStrategyConfig(StrategyConfig, frozen=True):
     max_stake_per_market: Decimal | None = None
     max_open_positions: int | None = None
     max_total_open_stake: Decimal | None = None
+    skip_entry: bool = False
+    city: str = ""
+    threshold: float | None = None
+    threshold_unit: str = "C"
+    band_type: str = "or_higher"  # "exact" | "or_higher" | "or_lower"
 
 
 class WeatherDailyTemperaturePaperStrategy(Strategy):
@@ -59,6 +80,7 @@ class WeatherDailyTemperaturePaperStrategy(Strategy):
         self.instrument: Instrument | None = None
         self._entry_submitted = False
         self._exit_submitted = False
+        self._latest_temp: TemperatureUpdate | None = None
 
     def _iter_open_positions(self):
         try:
@@ -154,6 +176,118 @@ class WeatherDailyTemperaturePaperStrategy(Strategy):
             self.stop()
             return
         self.subscribe_quote_ticks(self.config.instrument_id)
+        if self.config.city:
+            self.subscribe_data(DataType(TemperatureUpdate))
+        if self.config.skip_entry:
+            self._entry_submitted = True
+
+    def on_data(self, data) -> None:
+        """Handle incoming TemperatureUpdate events."""
+        if isinstance(data, TemperatureUpdate) and data.city == self.config.city:
+            self._latest_temp = data
+            self.log.debug(
+                f"Temp update {data.city}: {data.daily_max}{data.unit} "
+                f"({data.obs_count} obs, max so far)"
+            )
+
+    def _temperature_gate(self) -> bool:
+        """Return False to block entry based on live temperature signal.
+
+        Logic varies by band_type:
+
+        or_higher  — YES resolves if daily high >= threshold.
+                     Block YES if high is impossibly far below threshold late in day.
+                     Block NO  if high has already crossed threshold (certain YES = certain NO loss).
+
+        or_lower   — YES resolves if daily high <= threshold.
+                     Block YES if high has already exceeded threshold (certain NO).
+                     Block NO  if high is well below threshold late in day (certain YES = certain NO loss).
+
+        exact      — YES resolves if daily high lands in this specific band.
+                     Wunderground rounds to whole degrees, so the band is ±0.5 of threshold.
+                     Block YES if running high has already risen past this band (certain miss).
+                     Block YES if running high is more than 2 degrees below band late in day.
+                     Block NO  if running high is currently sitting in the band (likely to resolve YES).
+        """
+        obs = self._latest_temp
+        threshold = self.config.threshold
+        if obs is None or threshold is None:
+            return True  # no data available → don't block
+
+        side = self.config.token_side       # "yes" or "no"
+        band = self.config.band_type        # "exact" | "or_higher" | "or_lower"
+        hi = obs.daily_max
+        unit = obs.unit
+        # "past peak" heuristic: 20+ observations means we're well into the afternoon
+        past_peak = obs.obs_count >= 20
+
+        if band == "or_higher":
+            if side == "yes":
+                gap = threshold - hi        # positive = still below threshold
+                far_miss = gap > (8 if unit == "F" else 5)
+                if far_miss and past_peak:
+                    self.log.info(
+                        f"[TEMP GATE] Block YES or_higher: {obs.city} hi={hi}{unit} "
+                        f"threshold={threshold}{unit} gap={gap:.1f} obs={obs.obs_count}"
+                    )
+                    return False
+            elif side == "no":
+                if hi >= threshold:
+                    self.log.info(
+                        f"[TEMP GATE] Block NO or_higher: {obs.city} hi={hi}{unit} "
+                        f"already >= threshold={threshold}{unit}"
+                    )
+                    return False
+
+        elif band == "or_lower":
+            if side == "yes":
+                if hi > threshold:
+                    self.log.info(
+                        f"[TEMP GATE] Block YES or_lower: {obs.city} hi={hi}{unit} "
+                        f"already > threshold={threshold}{unit}"
+                    )
+                    return False
+            elif side == "no":
+                gap = threshold - hi        # positive = still below threshold
+                far_below = gap > (8 if unit == "F" else 5)
+                if far_below and past_peak:
+                    self.log.info(
+                        f"[TEMP GATE] Block NO or_lower: {obs.city} hi={hi}{unit} "
+                        f"threshold={threshold}{unit} gap={gap:.1f} obs={obs.obs_count}"
+                    )
+                    return False
+
+        elif band == "exact":
+            # Wunderground resolution is whole degrees, so band window is [threshold-0.5, threshold+0.5)
+            in_band = abs(hi - threshold) < 0.5
+            above_band = hi > threshold + 0.5
+            gap_below = threshold - hi      # positive = still below band
+
+            if side == "yes":
+                # Temp has already risen past this band → certain NO for this market
+                if above_band:
+                    self.log.info(
+                        f"[TEMP GATE] Block YES exact: {obs.city} hi={hi}{unit} "
+                        f"already above band={threshold}{unit}"
+                    )
+                    return False
+                # Temp is more than 2 degrees below band late in day → unlikely to reach it
+                if gap_below > 2 and past_peak:
+                    self.log.info(
+                        f"[TEMP GATE] Block YES exact: {obs.city} hi={hi}{unit} "
+                        f"band={threshold}{unit} gap={gap_below:.1f} obs={obs.obs_count}"
+                    )
+                    return False
+            elif side == "no":
+                # Temp is sitting in this band → strong signal it resolves YES → block NO
+                if in_band and past_peak:
+                    self.log.info(
+                        f"[TEMP GATE] Block NO exact: {obs.city} hi={hi}{unit} "
+                        f"currently in band={threshold}{unit} obs={obs.obs_count}"
+                    )
+                    return False
+
+        return True
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
         if self.instrument is None:
@@ -174,6 +308,9 @@ class WeatherDailyTemperaturePaperStrategy(Strategy):
                 bid_size=bid_size,
                 ask_size=ask_size,
             ):
+                return
+
+            if not self._temperature_gate():
                 return
 
             open_positions = list(

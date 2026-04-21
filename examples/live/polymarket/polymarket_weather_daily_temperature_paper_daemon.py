@@ -244,7 +244,7 @@ def _strategy_presets_for_set(
     if normalized in {"all", "full"}:
         return all_presets
     if normalized in {"live_90_basic", "live-weather-v1"}:
-        return tuple(p for p in all_presets if p.name == "temp_90c_basic")
+        return tuple(p for p in all_presets if p.name in {"temp_90c_basic", "temp_90c_no_basic"})
     if normalized in {"band_only", "band-only"}:
         return tuple(p for p in all_presets if p.mode == "band_only")
     if normalized == "basic":
