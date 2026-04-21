@@ -744,6 +744,14 @@ async def _run_direct_clob_entry_session(
                     _log.warning("No %s for %s — skipping", token_attr, slug)
                     continue
 
+                # Exact band YES at 90c is structurally high-risk: the temperature
+                # must land in a precise 1°C window to resolve YES. If it goes higher
+                # the market snaps directly from ~0.95 to ~0.01 at oracle time —
+                # bypassing the stop-loss entirely. Skip YES entries on exact bands.
+                if side == "yes" and getattr(market, "band_type", "or_higher") == "exact":
+                    _log.info("SKIP %s [yes]  exact band (band_type=exact) — YES entry skipped", slug)
+                    continue
+
                 # Fetch live mid from CLOB
                 try:
                     resp = await http.get(f"{clob_host}/midpoint?token_id={token_id}")

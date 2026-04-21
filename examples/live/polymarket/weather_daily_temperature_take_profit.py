@@ -99,8 +99,11 @@ class PositionWatch:
     def should_stop_loss(self) -> bool:
         if self.stop_loss is None:
             return False
-        m = self.mid
-        return m is not None and m <= self.stop_loss
+        # Use best_bid (what you can actually sell at) rather than mid.
+        # This fires earlier — as soon as buyers step back below SL — giving
+        # a better chance of execution before the market collapses to ~0.
+        bid = self.best_bid
+        return bid is not None and bid <= self.stop_loss
 
 
 # ---------------------------------------------------------------------------
