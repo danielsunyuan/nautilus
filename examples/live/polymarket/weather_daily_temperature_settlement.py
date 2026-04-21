@@ -125,17 +125,35 @@ class JsonlRunWriter:
 # Scanning
 # ---------------------------------------------------------------------------
 
+def _live_jsonl_files(jsonl_dir: Path) -> list[Path]:
+    """Return all JSONL files that belong to the live weather ledger.
+
+    Includes ``weather_temp_live_*.jsonl`` (entry records written by the daemon),
+    ``settlement_live.jsonl`` (settlement_update records written by this script),
+    and ``take_profit.jsonl`` (settlement_update records written by the take-profit
+    watcher when a position is exited early via take-profit or stop-loss).
+    Paper trade files (``overnight_*``, ``weather_temp_all_*``, the old
+    ``settlement.jsonl``, etc.) are excluded.
+    """
+    files = sorted(jsonl_dir.glob("weather_temp_live_*.jsonl"))
+    for extra_name in ("settlement_live.jsonl", "take_profit.jsonl"):
+        extra_file = jsonl_dir / extra_name
+        if extra_file.exists():
+            files.append(extra_file)
+    return files
+
+
 def _read_all_jsonl_rows(jsonl_dir: Path) -> list[tuple[str, dict]]:
     """Read rows from live-trade JSONL files only. Returns (filename, row) tuples.
 
-    Only files matching ``weather_temp_live_*.jsonl`` are read so that paper
-    trade files (e.g. ``overnight_*``, ``weather_temp_all_*``) are never mixed
-    into the live settlement ledger.
+    Reads ``weather_temp_live_*.jsonl`` (entry records) and ``settlement.jsonl``
+    (settlement_update records) so that settled P&L is visible to the resolver.
+    Paper trade files are never mixed into the live settlement ledger.
     """
     results: list[tuple[str, dict]] = []
     if not jsonl_dir.exists():
         return results
-    for jsonl_file in sorted(jsonl_dir.glob("weather_temp_live_*.jsonl")):
+    for jsonl_file in _live_jsonl_files(jsonl_dir):
         try:
             with jsonl_file.open("r", encoding="utf-8") as fh:
                 for line in fh:
@@ -609,7 +627,7 @@ def _refresh_report(jsonl_dir: Path, report_md_path: str) -> None:
         return
 
     all_rows: list[dict] = []
-    for jsonl_file in sorted(jsonl_dir.glob("weather_temp_live_*.jsonl")):
+    for jsonl_file in _live_jsonl_files(jsonl_dir):
         try:
             with jsonl_file.open("r", encoding="utf-8") as fh:
                 for line in fh:
@@ -655,7 +673,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         raise SystemExit("httpx is required: pip install httpx")
 
     jsonl_dir = Path(args.output_dir)
-    writer = JsonlRunWriter(jsonl_dir / "settlement.jsonl")
+    writer = JsonlRunWriter(jsonl_dir / "settlement_live.jsonl")
 
     rpc_url = os.environ.get("POLYMARKET_RPC_URL", "")
     private_key = os.environ.get("POLYMARKET_PRIVATE_KEY", "")

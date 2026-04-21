@@ -134,7 +134,15 @@ def load_open_positions(jsonl_dir: Path) -> dict[str, PositionWatch]:
     resolved_tokens: set[str] = set()
     all_rows: list[dict] = []
 
-    for jsonl_file in sorted(jsonl_dir.glob("*.jsonl")):
+    # Scan only live-trade files: entry records + settlement records (oracle and
+    # take-profit exits).  The old paper-trade files and settlement archive are
+    # excluded to avoid false-positive resolved_tokens matches.
+    live_files: list[Path] = sorted(jsonl_dir.glob("weather_temp_live_*.jsonl"))
+    for extra in ("settlement_live.jsonl", "take_profit.jsonl"):
+        p = jsonl_dir / extra
+        if p.exists():
+            live_files.append(p)
+    for jsonl_file in live_files:
         try:
             for line in jsonl_file.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
