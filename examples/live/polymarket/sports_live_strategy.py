@@ -40,7 +40,7 @@ class SportsPaperStrategyConfig(StrategyConfig, frozen=True):
     market_type: str = ""
     game_time: str = ""
     vegas_implied: float | None = None
-    family_instrument_ids: tuple[InstrumentId, ...] = ()
+    family_instrument_ids: tuple[str, ...] = ()  # instrument ID strings; InstrumentId is not msgspec-encodable
     target_usd_per_market: Decimal | None = None
     min_order_size_shares: Decimal = Decimal("0")
     max_stake_per_market: Decimal | None = None
@@ -102,7 +102,7 @@ class SportsPaperStrategy(Strategy):
         return str(instrument_id)
 
     def _family_has_existing_risk(self) -> bool:
-        family_ids = {str(i) for i in self.config.family_instrument_ids}
+        family_ids = set(self.config.family_instrument_ids)
         family_ids.add(str(self.config.instrument_id))
 
         for position in self._iter_open_positions():

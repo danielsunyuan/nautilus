@@ -604,7 +604,7 @@ async def _default_run_round(
     for market in markets:
         inst_id_str = _build_instrument_id(market)
         family_inst_ids = tuple(
-            InstrumentId.from_str(iid)
+            iid
             for iid in game_groups.get(_game_key(market), [])
             if iid != inst_id_str
         )
