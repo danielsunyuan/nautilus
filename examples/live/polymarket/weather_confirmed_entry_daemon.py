@@ -72,6 +72,28 @@ _log = __import__("logging").getLogger(__name__)
 TARGET_USD = Decimal("2")
 
 
+def clob_best_bid_ask(order_book) -> tuple[float | None, float | None]:
+    """Return (best_bid, best_ask) from a py_clob_client OrderBookSummary.
+
+    IMPORTANT — sort order quirk in the Polymarket CLOB API:
+      - ``bids`` are returned in ASCENDING price order (lowest first, highest LAST).
+        best_bid = bids[-1], NOT bids[0].
+      - ``asks`` are returned in ASCENDING price order (lowest first = best ask first).
+        best_ask = asks[0].
+
+    Using bids[0] as best_bid silently returns the WORST bid (near zero for a
+    near-certain winning token), which is the opposite of correct and will cause
+    stop-loss checks, EV calculations, and exit decisions to be wrong.
+    """
+    best_bid: float | None = None
+    best_ask: float | None = None
+    if order_book and order_book.bids:
+        best_bid = float(order_book.bids[-1].price)  # highest price = last element
+    if order_book and order_book.asks:
+        best_ask = float(order_book.asks[0].price)   # lowest price = first element
+    return best_bid, best_ask
+
+
 def _next_poll_secs(
     markets: list,
     latest_obs: dict[str, StationObs],
