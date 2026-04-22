@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, date
@@ -78,6 +79,7 @@ _DEFAULT_TWC_KEY = "6532d6454b8aa370768e63d6ba5a832e"
 CITY_STATIONS: dict[str, tuple[str, str, str, str]] = {
     # ---- United States — Fahrenheit — WU oracle ----
     "NYC":           ("KLGA", "US", "F", "wu"),
+    "New York City": ("KLGA", "US", "F", "wu"),  # alias: resolver outputs full name
     "Chicago":       ("KORD", "US", "F", "wu"),
     "Miami":         ("KMIA", "US", "F", "wu"),
     "Los Angeles":   ("KLAX", "US", "F", "wu"),
@@ -189,6 +191,34 @@ _TWC_HIST_URL = (
     "?apiKey={key}&units={units}&startDate={date}&endDate={date}"
 )
 
+_WU_SCRAPE_URL = (
+    "https://www.wunderground.com/history/daily/us/new-york/KLGA/date/2026-4-22"
+)
+_TWC_KEY_RE = re.compile(r"apiKey[=:][\"'\s]*([a-f0-9]{32})")
+
+# Module-level mutable key cache so a refreshed key persists across calls
+_active_twc_key: str | None = None
+
+
+async def _scrape_fresh_twc_key() -> str | None:
+    """Scrape the current TWC API key from the Wunderground frontend."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"},
+            follow_redirects=True,
+        ) as client:
+            r = await client.get(_WU_SCRAPE_URL)
+        keys = _TWC_KEY_RE.findall(r.text)
+        if keys:
+            # Most frequent key is the active one
+            fresh = max(set(keys), key=keys.count)
+            log.info("TWC key refreshed via Wunderground scrape: %s…", fresh[:8])
+            return fresh
+    except Exception as exc:
+        log.warning("TWC key scrape failed: %s", exc)
+    return None
+
 
 async def _fetch_twc_daily_high(
     city: str,
@@ -208,6 +238,18 @@ async def _fetch_twc_daily_high(
     try:
         async with httpx.AsyncClient(timeout=12) as client:
             r = await client.get(url)
+        if r.status_code == 401:
+            # Key has rotated — scrape a fresh one and retry once
+            global _active_twc_key
+            fresh_key = await _scrape_fresh_twc_key()
+            if fresh_key and fresh_key != api_key:
+                _active_twc_key = fresh_key
+                os.environ["TWC_API_KEY"] = fresh_key
+                retry_url = _TWC_HIST_URL.format(
+                    loc=station, iso=iso, key=fresh_key, units=units_param, date=date_str,
+                )
+                async with httpx.AsyncClient(timeout=12) as client:
+                    r = await client.get(retry_url)
         if r.status_code != 200:
             log.warning("TWC historical %s %s: HTTP %d", city, station, r.status_code)
             return None
@@ -414,7 +456,7 @@ async def fetch_daily_high(
         if cached is not None:
             return cached
 
-    key = api_key or os.environ.get("TWC_API_KEY", _DEFAULT_TWC_KEY)
+    key = api_key or _active_twc_key or os.environ.get("TWC_API_KEY", _DEFAULT_TWC_KEY)
     station, iso, unit, oracle_type = CITY_STATIONS[city]
 
     obs: StationObs | None = None
