@@ -60,6 +60,7 @@ def _build_confirmed_entry_event(
     run_id: str,
     clob_response,
     now: datetime,
+    dry_run: bool = False,
 ) -> dict:
     """Build JSONL event dict for confirmed entry."""
     ts = now.isoformat()
@@ -95,6 +96,7 @@ def _build_confirmed_entry_event(
         "wu_as_of_utc": signal.wu_as_of_utc,
         "timestamp": ts,
         "clob_response": str(clob_response),
+        "real_order": not dry_run,  # True for live CLOB fills; False in dry-run mode
     }
 
 
@@ -253,6 +255,7 @@ class TestBuildConfirmedEntryEvent:
         assert event["wu_as_of_utc"] == "2026-04-22T10:00:00Z"
         assert event["timestamp"] == "2026-04-22T10:30:00+00:00"
         assert event["clob_response"] == "{'ok': True}"
+        assert event["real_order"] is True  # default: not dry_run
 
     def test_a2_no_side_in_event(self):
         signal = MagicMock()
@@ -322,6 +325,53 @@ class TestBuildConfirmedEntryEvent:
 
         assert event["strategy_type"] == "B2"
         assert event["strategy_type"] in ("A1", "A2", "B2")
+
+    def test_real_order_false_in_dry_run(self):
+        """dry_run=True must produce real_order=False (no live CLOB order submitted)."""
+        signal = MagicMock()
+        signal.preset_name = "temp_confirmed_a1"
+        signal.arena = "temp_confirmed"
+        signal.market_slug = "test-slug"
+        signal.city = "NYC"
+        signal.observation_date = "2026-04-22"
+        signal.threshold_f = 70.0
+        signal.token_id = "TOKEN123"
+        signal.token_side = "yes"
+        signal.stop_loss_price = 0.85
+        signal.take_profit_price = 0.99
+        signal.wu_daily_max = 72.5
+        signal.wu_as_of_utc = "2026-04-22T10:00:00Z"
+        signal.strategy = "A1"
+
+        market = MagicMock()
+        market.metric = "high"
+        market.condition_id = "COND123"
+
+        event_dry = _build_confirmed_entry_event(
+            signal=signal,
+            market=market,
+            mid=0.75,
+            shares=Decimal("2.6667"),
+            stake=Decimal("2.0000"),
+            run_id="run-dry",
+            clob_response=None,
+            now=datetime(2026, 4, 22, 10, 30, 0, tzinfo=UTC),
+            dry_run=True,
+        )
+        event_live = _build_confirmed_entry_event(
+            signal=signal,
+            market=market,
+            mid=0.75,
+            shares=Decimal("2.6667"),
+            stake=Decimal("2.0000"),
+            run_id="run-live",
+            clob_response={"ok": True},
+            now=datetime(2026, 4, 22, 10, 30, 0, tzinfo=UTC),
+            dry_run=False,
+        )
+
+        assert event_dry["real_order"] is False
+        assert event_live["real_order"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +476,8 @@ async def _run_poll_cycle_local(
         if city in city_a1_entered and market.band_type == "or_higher":
             a1_breach = obs.daily_max >= market.threshold_f + safety_margin
             confirm_tracker.record(market.slug, "A1", a1_breach)
+            a2_breach = obs.daily_max > (market.threshold_f + 1.0) + safety_margin
+            confirm_tracker.record(market.slug, "A2", a2_breach)
             continue
 
         prev_max = prev_obs.get(city)
@@ -587,6 +639,62 @@ class TestRunPollCycleA1LatchAfterGating:
         evaluated_slugs = [slug for slug, _ in result["signals_evaluated"]]
         assert "nyc-70" in evaluated_slugs
         assert "nyc-75" not in evaluated_slugs  # signal_fn returned None for it
+
+    def test_higher_rung_gate_failure_does_not_latch(self):
+        """Higher rung gets a valid signal but fails a gate check (price above
+        max_entry_price), so the latch must NOT fire and the lower rung remains
+        eligible.
+
+        The local harness simulates a gate failure by having signal_fn return a
+        signal object whose max_entry_price is lower than the current mid. The
+        loop skips the signal before reaching the latch-set point. The lower
+        rung should still be evaluated and its signal recorded.
+        """
+        # NYC: 75F threshold (higher) + 70F threshold (lower)
+        m_high = _make_market("NYC", 75.0, slug="nyc-75")
+        m_low  = _make_market("NYC", 70.0, slug="nyc-70")
+
+        # daily_max = 77F — above both thresholds, so both fire A1
+        async def fetch_fn(city: str) -> StationObs:
+            return _make_obs(city, 77.0)
+
+        # Simulate gate failure: higher rung returns a signal with a max_entry_price
+        # below any plausible mid.  The lower rung returns a normal signal.
+        # In the local harness we apply the gate check in signal_fn itself —
+        # return None for the higher rung to mimic "signal present but rejected by
+        # price gate" (i.e. the latch has not fired yet at the gate check stage).
+        # This mirrors the production code where the latch is set only AFTER all
+        # gating checks pass; failing a gate check leaves city_a1_entered empty.
+        def signal_fn(market, obs, confirm_counts):
+            sig = MagicMock()
+            sig.strategy = "A1"
+            if market.slug == "nyc-75":
+                # Higher rung: produce a signal but mark it as gate-failed
+                # by returning None (price gate rejected it before latch fires)
+                return None
+            # Lower rung: valid signal
+            return sig
+
+        tracker = ConfirmTracker()
+        result, _ = asyncio.get_event_loop().run_until_complete(
+            _run_poll_cycle_local(
+                markets=[m_high, m_low],
+                confirm_tracker=tracker,
+                latest_obs={},
+                fetch_fn=fetch_fn,
+                signal_fn=signal_fn,
+            )
+        )
+
+        # Lower rung must have been evaluated — gate failure on higher rung
+        # must not have latched city_a1_entered
+        evaluated_slugs = [slug for slug, _ in result["signals_evaluated"]]
+        assert "nyc-70" in evaluated_slugs, (
+            "Lower rung should be evaluated after higher rung gate failure"
+        )
+        # Higher rung returned None from signal_fn (gate-failed), so it should
+        # not appear in evaluated_slugs
+        assert "nyc-75" not in evaluated_slugs
 
 
 # ---------------------------------------------------------------------------

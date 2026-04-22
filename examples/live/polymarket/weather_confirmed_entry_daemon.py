@@ -106,6 +106,7 @@ def _build_confirmed_entry_event(
     run_id: str,
     clob_response,
     now: datetime,
+    dry_run: bool = False,
 ) -> dict:
     """Build JSONL event dict for confirmed entry."""
     ts = now.isoformat()
@@ -141,7 +142,7 @@ def _build_confirmed_entry_event(
         "wu_as_of_utc": signal.wu_as_of_utc,
         "timestamp": ts,
         "clob_response": str(clob_response),
-        "real_order": True,  # distinguishes real CLOB fills from paper sandbox entries
+        "real_order": not dry_run,  # True for live CLOB fills; False in dry-run mode
     }
 
 
@@ -155,7 +156,7 @@ async def _run_poll_cycle(
     dry_run: bool,
     confirm_tracker: ConfirmTracker,
     latest_obs: dict[str, StationObs],
-    entered_this_run: set[tuple[str, str]],
+    entered_this_session: set[tuple[str, str]],
     output_dir: Path,
     session_trading_day,
 ) -> tuple[Decimal, float]:
@@ -267,6 +268,8 @@ async def _run_poll_cycle(
                 )
                 a1_breach = obs.daily_max >= market.threshold_f + safety_margin
                 confirm_tracker.record(market.slug, "A1", a1_breach)
+                a2_breach = obs.daily_max > (market.threshold_f + 1.0) + safety_margin
+                confirm_tracker.record(market.slug, "A2", a2_breach)
                 continue
 
             prev_max = prev_obs.get(city)
@@ -308,7 +311,7 @@ async def _run_poll_cycle(
                 continue
 
             # Skip if already entered this session (main loop pre-filters, but guard here too)
-            if (market.slug, signal.token_side) in entered_this_run:
+            if (market.slug, signal.token_side) in entered_this_session:
                 continue
 
             # Fetch CLOB mid
@@ -394,12 +397,13 @@ async def _run_poll_cycle(
                     run_id=run_id,
                     clob_response=clob_response,
                     now=now_fn(),
+                    dry_run=dry_run,
                 )
             )
 
             # Clear tracker and record entry
             confirm_tracker.clear_slug(market.slug)
-            entered_this_run.add((market.slug, signal.token_side))
+            entered_this_session.add((market.slug, signal.token_side))
             budget_remaining -= stake
 
     return budget_remaining, next_poll_secs
@@ -459,23 +463,8 @@ async def _run_main_loop(
         ]
 
         # poll_secs is computed inside _run_poll_cycle from freshly-fetched obs.
-        # We default to 900.0 for the poll_cycle event timestamp; the actual sleep
-        # uses the value returned by _run_poll_cycle so the first cycle reflects
-        # real data, not stale state from before the fetch.
+        # Default to 900.0 if there are no tradeable markets (no cycle runs).
         poll_secs = 900.0
-
-        # Write poll_cycle event (poll_interval_secs updated below after cycle)
-        writer.write(
-            {
-                "run_id": run_id,
-                "event": "poll_cycle",
-                "tradeable_markets_count": len(tradeable),
-                "poll_interval_secs": poll_secs,
-                "session_trading_day": str(session_trading_day),
-                "dry_run": dry_run,
-                "timestamp": started_at.isoformat(),
-            }
-        )
 
         # Run poll cycle if there are tradeable markets
         if tradeable:
@@ -488,10 +477,25 @@ async def _run_main_loop(
                 dry_run=dry_run,
                 confirm_tracker=confirm_tracker,
                 latest_obs=latest_obs,
-                entered_this_run=entered_this_session,
+                entered_this_session=entered_this_session,
                 output_dir=output_dir,
                 session_trading_day=session_trading_day,
             )
+
+        # Write poll_cycle event after the cycle so poll_interval_secs reflects
+        # the actual next-sleep value derived from fresh observations, not a
+        # stale pre-fetch estimate.
+        writer.write(
+            {
+                "run_id": run_id,
+                "event": "poll_cycle",
+                "tradeable_markets_count": len(tradeable),
+                "poll_interval_secs": poll_secs,
+                "session_trading_day": str(session_trading_day),
+                "dry_run": dry_run,
+                "timestamp": started_at.isoformat(),
+            }
+        )
 
         rounds += 1
         _log.info(
