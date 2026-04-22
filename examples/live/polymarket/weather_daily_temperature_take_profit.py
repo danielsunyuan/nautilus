@@ -48,7 +48,7 @@ del _poly_helpers, _httpx
 
 log = logging.getLogger(__name__)
 
-DEFAULT_OUTPUT_DIR = "/workspace/nautilus/outputs"
+DEFAULT_OUTPUT_DIR = "/workspace/outputs"
 DEFAULT_WSS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 DEFAULT_CLOB_HOST = "https://clob.polymarket.com"
 

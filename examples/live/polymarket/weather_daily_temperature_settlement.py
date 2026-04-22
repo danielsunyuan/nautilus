@@ -95,6 +95,7 @@ class UnresolvedEntry:
     city: str
     observation_date: str
     source_file: str  # which JSONL file it came from
+    real_order: bool = False  # True only for confirmed-entry daemon (real CLOB fills)
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +240,10 @@ def scan_unresolved_entries(jsonl_dir: Path) -> list[UnresolvedEntry]:
         if token_id in settled:
             continue
 
+        # real_order=True only for confirmed-entry daemon entries.
+        # weather_temp_live_* entries are NautilusTrader sandbox paper trades.
+        is_real = bool(row.get("real_order", False)) or fname.startswith("weather_confirmed_live_")
+
         entries.append(
             UnresolvedEntry(
                 market_slug=row.get("market_slug", ""),
@@ -253,6 +258,7 @@ def scan_unresolved_entries(jsonl_dir: Path) -> list[UnresolvedEntry]:
                 city=row.get("city", ""),
                 observation_date=row.get("observation_date", ""),
                 source_file=fname,
+                real_order=is_real,
             )
         )
     return entries
@@ -302,6 +308,7 @@ def compute_settlement(
         "pnl": pnl,
         "resolved": True,
         "resolved_outcome": resolved_outcome,
+        "real_order": entry.real_order,
     }
 
 
@@ -573,15 +580,28 @@ async def _redeem_pending_wins(
     all_rows = _read_all_jsonl_rows(jsonl_dir)
     redeemed_cids = _collect_redeemed_condition_ids(all_rows)
 
-    # Collect the first WIN settlement event per condition_id that needs redemption
-    pending: dict[str, dict] = {}
+    # Collect the LATEST settlement_update per condition_id.
+    # Using latest-wins so that a correction record (resolved_outcome=loss)
+    # appended after a spurious WIN will cancel the redemption attempt.
+    latest_settlements: dict[str, dict] = {}
     for _fname, row in all_rows:
         if row.get("event") != "settlement_update":
             continue
+        cid = row.get("condition_id", "")
+        if not cid:
+            continue
+        latest_settlements[cid] = row  # later rows overwrite earlier ones
+
+    pending: dict[str, dict] = {}
+    for cid, row in latest_settlements.items():
         if row.get("resolved_outcome") != "win":
             continue
-        cid = row.get("condition_id", "")
-        if not cid or cid in redeemed_cids or cid in pending:
+        if cid in redeemed_cids:
+            continue
+        # Only attempt redemption for confirmed (real CLOB) entries.
+        # weather_temp_live_* entries are NautilusTrader sandbox paper trades —
+        # they never exist on-chain, so redemption is impossible and pointless.
+        if not row.get("real_order", False):
             continue
         pending[cid] = row
 

@@ -20,13 +20,62 @@ from datetime import datetime
 from typing import Any
 
 
-# All known arenas
-ALL_ARENAS = ["temp_50c", "temp_60c", "temp_70c", "temp_80c", "temp_90c"]
+# All known arenas — includes live-daemon arenas (temp_90c_no) and
+# confirmed-entry daemon arena (temp_confirmed) so they always render.
+ALL_ARENAS = [
+    "temp_50c",
+    "temp_60c",
+    "temp_70c",
+    "temp_80c",
+    "temp_90c",
+    "temp_90c_no",
+    "temp_confirmed",
+]
 
 # Graduation gates (report as warnings, don't filter)
 MIN_RESOLVED_PER_ARENA = 100
 MIN_RESOLVED_PER_CITY = 30
 MIN_CALENDAR_DAYS = 7
+
+
+def normalize_strategy_name(row: dict[str, Any]) -> str:
+    """Return a human-readable strategy name from a ledger row.
+
+    Compatibility bridge: older daemon rows may not have a ``strategy_name``
+    field but will have ``preset_name`` or ``strategy_type``.  Fall back in
+    order so every row is attributed to a named strategy.
+    """
+    name = row.get("strategy_name")
+    if name:
+        return str(name)
+    name = row.get("preset_name")
+    if name:
+        return str(name)
+    name = row.get("strategy_type")
+    if name:
+        return str(name)
+    return "unknown"
+
+
+def make_entry_id(row: dict[str, Any]) -> str:
+    """Return a stable identifier for a strategy_result ledger row.
+
+    If the row already carries an ``entry_id`` field, that value is returned
+    unchanged.  Otherwise a synthetic key is built from
+    ``(market_slug, entry_time, token_side)`` so that:
+
+    - Two strategies entering the same market on different days get different
+      IDs (different ``entry_time``).
+    - Two strategies entering the same market at the same time still differ if
+      they took different sides (``token_side``).
+    - The key is stable across repeated reads of the same JSONL file.
+    """
+    if row.get("entry_id"):
+        return str(row["entry_id"])
+    slug = row.get("market_slug", "")
+    entry_time = row.get("entry_time") or row.get("timestamp") or ""
+    token_side = row.get("token_side", "yes")
+    return f"{slug}|{entry_time}|{token_side}"
 
 
 def _classify_row(row: dict[str, Any]) -> str:
@@ -43,9 +92,23 @@ def _classify_row(row: dict[str, Any]) -> str:
     if not resolved:
         return "unresolved"
 
+    # Non-oracle exits: if the row has an explicit exit_method (e.g. take_profit,
+    # stop_loss) OR if settlement_price is between 0.01 and 0.99 (not a terminal
+    # oracle value), trust resolved_outcome and pnl directly.
+    exit_method = row.get("exit_method")
     settlement_price = row.get("settlement_price")
     pnl = row.get("pnl")
-    if settlement_price == 1.0 and pnl is not None and pnl > 0:
+
+    if exit_method is not None:
+        # Manual / TP / SL exit: trust resolved_outcome field
+        return str(resolved_outcome) if resolved_outcome in ("win", "loss") else "loss"
+
+    if settlement_price is not None and 0.01 <= float(settlement_price) <= 0.99:
+        # Mid-market exit price — trust the pnl sign rather than oracle threshold
+        return "win" if pnl is not None and float(pnl) > 0 else "loss"
+
+    # Oracle resolution: winning token settles at 1.0, losing at 0.0
+    if settlement_price == 1.0 and pnl is not None and float(pnl) > 0:
         return "win"
     return "loss"
 
@@ -100,18 +163,26 @@ def merge_entries_with_settlements(rows: list[dict]) -> list[dict]:
     """Merge strategy_result entries with their settlement_update events.
 
     For each strategy_result row, if a matching settlement_update exists
-    (same market_slug + strategy_name), override the entry's resolution fields
+    (matched by stable entry_id), override the entry's resolution fields
     with the settlement data.
+
+    The stable entry_id is synthesised from (market_slug, entry_time,
+    token_side) when an explicit ``entry_id`` field is absent.  This prevents
+    two strategies entering the same market at different times from silently
+    overwriting each other — the old (market_slug, strategy_name) key was
+    non-unique in that scenario.
 
     Returns a list of merged rows ready for aggregation. Non-strategy_result,
     non-settlement_update rows pass through unchanged. Settlement_update rows
     with no matching strategy_result are dropped (orphaned settlements).
     """
-    # Index settlement_update events by (market_slug, strategy_name)
-    settlements: dict[tuple[str, str], dict] = {}
+    # Index settlement_update events by entry_id.
+    # When multiple settlements share an entry_id, the last one wins (latest
+    # correction record takes precedence).
+    settlements: dict[str, dict] = {}
     for row in rows:
         if row.get("event") == "settlement_update":
-            key = (row.get("market_slug", ""), row.get("strategy_name", ""))
+            key = make_entry_id(row)
             settlements[key] = row
 
     result: list[dict] = []
@@ -121,7 +192,11 @@ def merge_entries_with_settlements(rows: list[dict]) -> list[dict]:
             # Settlement rows are consumed via the index; don't include them directly
             continue
         if event == "strategy_result":
-            key = (row.get("market_slug", ""), row.get("strategy_name", ""))
+            # Normalize strategy name for attribution
+            if "strategy_name" not in row or not row["strategy_name"]:
+                row = dict(row)
+                row["strategy_name"] = normalize_strategy_name(row)
+            key = make_entry_id(row)
             settlement = settlements.get(key)
             if settlement is not None:
                 # Copy the row and override resolution fields
@@ -130,6 +205,9 @@ def merge_entries_with_settlements(rows: list[dict]) -> list[dict]:
                 merged_row["resolved_outcome"] = settlement.get("resolved_outcome")
                 merged_row["settlement_price"] = settlement.get("settlement_price")
                 merged_row["pnl"] = settlement.get("pnl")
+                # Carry through exit_method if the settlement recorded one
+                if settlement.get("exit_method") is not None:
+                    merged_row["exit_method"] = settlement["exit_method"]
                 result.append(merged_row)
             else:
                 result.append(row)
@@ -165,7 +243,7 @@ def build_weather_temperature_summary(rows: list[dict]) -> dict:
         classification = _classify_row(row)
 
         arena = row.get("arena", "unknown")
-        strategy_name = row.get("strategy_name", "unknown")
+        strategy_name = normalize_strategy_name(row)
         city = row.get("city", "unknown")
         obs_date = row.get("observation_date")
         if obs_date:

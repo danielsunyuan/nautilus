@@ -463,3 +463,253 @@ class TestMergeEntriesWithSettlements:
         assert totals["resolved_losses"] == 1
         assert totals["resolved_trades"] == 2
         assert abs(totals["resolved_win_rate"] - 0.5) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# New tests: ledger attribution, duplicate keys, TP classification, arenas
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeStrategyName:
+
+    def test_uses_strategy_name_when_present(self) -> None:
+        row = {"strategy_name": "temp_70c_basic", "preset_name": "other", "strategy_type": "basic"}
+        assert report_mod.normalize_strategy_name(row) == "temp_70c_basic"
+
+    def test_falls_back_to_preset_name_when_no_strategy_name(self) -> None:
+        """Confirmed-entry rows have preset_name but no strategy_name."""
+        row = {"preset_name": "confirmed_a1", "strategy_type": "basic"}
+        assert report_mod.normalize_strategy_name(row) == "confirmed_a1"
+
+    def test_falls_back_to_strategy_type_when_no_preset_name(self) -> None:
+        """Old rows that only have strategy_type are attributed correctly."""
+        row = {"strategy_type": "band_only"}
+        assert report_mod.normalize_strategy_name(row) == "band_only"
+
+    def test_returns_unknown_when_all_absent(self) -> None:
+        row = {"arena": "temp_70c"}
+        assert report_mod.normalize_strategy_name(row) == "unknown"
+
+    def test_leaderboard_groups_confirmed_row_under_preset_name(self) -> None:
+        """A strategy_result row with only preset_name appears under that name in
+        the strategy leaderboard (not under 'unknown')."""
+        row = {
+            "run_id": "run-conf-001",
+            "event": "strategy_result",
+            "market_slug": "nyc-high-temp-90-2026-04-20",
+            "arena": "temp_confirmed",
+            "city": "New York",
+            "observation_date": "2026-04-20",
+            "token_side": "yes",
+            # No strategy_name — only preset_name (confirmed-entry daemon pattern)
+            "preset_name": "confirmed_a1",
+            "entry_price": 0.90,
+            "shares": 5.0,
+            "stake": 4.5,
+            "pnl": 0.5,
+            "settlement_price": 1.0,
+            "resolved_outcome": "win",
+            "resolved": True,
+        }
+        summary = report_mod.build_weather_temperature_summary([row])
+        strat_names = [s["strategy_name"] for s in summary["strategy_leaderboard"]]
+        assert "confirmed_a1" in strat_names
+        assert "unknown" not in strat_names
+
+
+class TestDuplicateEntryIds:
+
+    def test_two_entries_same_market_different_times_both_survive(self) -> None:
+        """Two strategy_result rows for the same market but at different entry_times
+        must not overwrite each other during merge — both must appear in the output."""
+        entry_a = {
+            "run_id": "run-dup-001",
+            "event": "strategy_result",
+            "market_slug": "nyc-high-temp-70-2026-04-20",
+            "strategy_name": "temp_70c_basic",
+            "arena": "temp_70c",
+            "city": "New York",
+            "observation_date": "2026-04-20",
+            "token_side": "yes",
+            "entry_price": 0.60,
+            "shares": 10.0,
+            "stake": 6.0,
+            "resolved": False,
+            "resolved_outcome": None,
+            "settlement_price": None,
+            "pnl": None,
+            "entry_time": "2026-04-20T08:00:00Z",
+        }
+        entry_b = {
+            "run_id": "run-dup-002",
+            "event": "strategy_result",
+            "market_slug": "nyc-high-temp-70-2026-04-20",
+            "strategy_name": "temp_70c_basic",
+            "arena": "temp_70c",
+            "city": "New York",
+            "observation_date": "2026-04-20",
+            "token_side": "yes",
+            "entry_price": 0.65,
+            "shares": 8.0,
+            "stake": 5.2,
+            "resolved": False,
+            "resolved_outcome": None,
+            "settlement_price": None,
+            "pnl": None,
+            "entry_time": "2026-04-20T14:00:00Z",
+        }
+        merged = report_mod.merge_entries_with_settlements([entry_a, entry_b])
+        assert len(merged) == 2, "Both entries must survive the merge"
+
+    def test_two_entries_same_market_different_entry_ids_both_survive(self) -> None:
+        """Explicit entry_id fields prevent key collision."""
+        entry_a = {
+            "event": "strategy_result",
+            "market_slug": "nyc-high-temp-70-2026-04-20",
+            "strategy_name": "temp_70c_basic",
+            "entry_id": "eid-001",
+            "shares": 10.0,
+            "resolved": False,
+            "pnl": None,
+            "settlement_price": None,
+            "resolved_outcome": None,
+        }
+        entry_b = {
+            "event": "strategy_result",
+            "market_slug": "nyc-high-temp-70-2026-04-20",
+            "strategy_name": "temp_70c_basic",
+            "entry_id": "eid-002",
+            "shares": 8.0,
+            "resolved": False,
+            "pnl": None,
+            "settlement_price": None,
+            "resolved_outcome": None,
+        }
+        merged = report_mod.merge_entries_with_settlements([entry_a, entry_b])
+        assert len(merged) == 2, "Different entry_ids must keep both entries"
+
+
+class TestTakeProfitClassification:
+
+    def test_tp_exit_settlement_price_095_classified_as_win(self) -> None:
+        """A take-profit exit at 0.95 with positive pnl must be classified as 'win',
+        not 'loss' (the old oracle-only check would wrongly score this as a loss)."""
+        row = {
+            "event": "strategy_result",
+            "market_slug": "nyc-high-temp-90-2026-04-20",
+            "arena": "temp_90c",
+            "city": "New York",
+            "observation_date": "2026-04-20",
+            "token_side": "yes",
+            "strategy_name": "temp_90c_basic",
+            "entry_price": 0.80,
+            "shares": 10.0,
+            "stake": 8.0,
+            "pnl": 1.0,
+            "settlement_price": 0.95,
+            "resolved_outcome": "win",
+            "resolved": True,
+            "exit_method": "take_profit",
+        }
+        result = report_mod._classify_row(row)
+        assert result == "win", f"Expected 'win', got '{result}'"
+
+    def test_tp_exit_mid_price_pnl_positive_classified_as_win(self) -> None:
+        """Mid-market exit (settlement_price between 0.01 and 0.99) with positive pnl
+        is a win even without an explicit exit_method."""
+        row = {
+            "event": "strategy_result",
+            "market_slug": "nyc-high-temp-90-2026-04-20",
+            "arena": "temp_90c",
+            "city": "New York",
+            "observation_date": "2026-04-20",
+            "token_side": "yes",
+            "strategy_name": "temp_90c_basic",
+            "entry_price": 0.80,
+            "shares": 10.0,
+            "stake": 8.0,
+            "pnl": 1.5,
+            "settlement_price": 0.95,
+            "resolved_outcome": "win",
+            "resolved": True,
+        }
+        result = report_mod._classify_row(row)
+        assert result == "win", f"Expected 'win', got '{result}'"
+
+    def test_tp_exit_pnl_negative_classified_as_loss(self) -> None:
+        """A stop-loss exit with negative pnl at 0.40 is classified as 'loss'."""
+        row = {
+            "event": "strategy_result",
+            "market_slug": "nyc-high-temp-90-2026-04-20",
+            "arena": "temp_90c",
+            "city": "New York",
+            "observation_date": "2026-04-20",
+            "token_side": "yes",
+            "strategy_name": "temp_90c_basic",
+            "entry_price": 0.80,
+            "shares": 10.0,
+            "stake": 8.0,
+            "pnl": -4.0,
+            "settlement_price": 0.40,
+            "resolved_outcome": "loss",
+            "resolved": True,
+            "exit_method": "stop_loss",
+        }
+        result = report_mod._classify_row(row)
+        assert result == "loss", f"Expected 'loss', got '{result}'"
+
+
+class TestArenaRendering:
+
+    def test_temp_90c_no_appears_in_arena_table(self) -> None:
+        """temp_90c_no trades must render in the arena leaderboard table."""
+        row = {
+            "run_id": "run-90no-001",
+            "event": "strategy_result",
+            "market_slug": "nyc-high-temp-90-no-2026-04-20",
+            "arena": "temp_90c_no",
+            "strategy_name": "temp_90c_no_basic",
+            "city": "New York",
+            "observation_date": "2026-04-20",
+            "token_side": "no",
+            "entry_price": 0.10,
+            "shares": 5.0,
+            "stake": 0.5,
+            "pnl": 4.5,
+            "settlement_price": 1.0,
+            "resolved_outcome": "win",
+            "resolved": True,
+        }
+        summary = report_mod.build_weather_temperature_summary([row])
+        md = report_mod.render_weather_temperature_markdown(summary)
+        assert "temp_90c_no" in md
+
+    def test_temp_confirmed_appears_in_arena_table(self) -> None:
+        """temp_confirmed trades (confirmed-entry daemon) must render in the table."""
+        row = {
+            "run_id": "run-conf-002",
+            "event": "strategy_result",
+            "market_slug": "nyc-high-temp-90-2026-04-21",
+            "arena": "temp_confirmed",
+            "strategy_name": "confirmed_a1",
+            "city": "New York",
+            "observation_date": "2026-04-21",
+            "token_side": "yes",
+            "entry_price": 0.92,
+            "shares": 3.0,
+            "stake": 2.76,
+            "pnl": 0.24,
+            "settlement_price": 1.0,
+            "resolved_outcome": "win",
+            "resolved": True,
+        }
+        summary = report_mod.build_weather_temperature_summary([row])
+        md = report_mod.render_weather_temperature_markdown(summary)
+        assert "temp_confirmed" in md
+
+    def test_all_known_arenas_always_render(self) -> None:
+        """ALL_ARENAS entries always appear in the arena table even with no data."""
+        summary = report_mod.build_weather_temperature_summary([])
+        md = report_mod.render_weather_temperature_markdown(summary)
+        for arena_name in report_mod.ALL_ARENAS:
+            assert arena_name in md, f"Arena '{arena_name}' missing from report"

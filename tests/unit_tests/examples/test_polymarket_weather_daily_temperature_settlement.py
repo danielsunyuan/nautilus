@@ -6,7 +6,6 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 import sys
-import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -56,10 +55,17 @@ JsonlRunWriter = mod.JsonlRunWriter
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Fake instrument_id template: <condition_id>-<token_id>.POLYMARKET
+_FAKE_CONDITION_ID = "0xabc123"
+_FAKE_TOKEN_ID = "99999abc"
+_FAKE_INSTRUMENT_ID = f"{_FAKE_CONDITION_ID}-{_FAKE_TOKEN_ID}.POLYMARKET"
+
+
 def _make_strategy_result(
     *,
     market_slug: str = "will-the-high-temperature-nyc-70f",
-    condition_id: str = "0xabc123",
+    condition_id: str = _FAKE_CONDITION_ID,
+    token_id: str = _FAKE_TOKEN_ID,
     strategy_name: str = "temp_70c_basic",
     arena: str = "temp_70c",
     token_side: str = "yes",
@@ -71,12 +77,16 @@ def _make_strategy_result(
     resolved: bool = False,
     resolved_outcome: str | None = None,
     run_id: str = "run-001",
+    accounting_status: str = "open",
 ) -> dict:
+    """Build a strategy_result row with the fields scan_unresolved_entries expects."""
+    instrument_id = f"{condition_id}-{token_id}.POLYMARKET"
     row: dict = {
         "event": "strategy_result",
         "run_id": run_id,
         "market_slug": market_slug,
         "condition_id": condition_id,
+        "instrument_id": instrument_id,
         "strategy_name": strategy_name,
         "arena": arena,
         "token_side": token_side,
@@ -86,6 +96,7 @@ def _make_strategy_result(
         "city": city,
         "observation_date": observation_date,
         "resolved": resolved,
+        "accounting_status": accounting_status,
     }
     if resolved_outcome is not None:
         row["resolved_outcome"] = resolved_outcome
@@ -107,11 +118,11 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 def test_scan_unresolved_entries_finds_pending(tmp_path: Path):
     """Two unresolved + one already-resolved; scan returns only the two."""
     rows = [
-        _make_strategy_result(market_slug="slug-a", condition_id="0xa", resolved=False),
-        _make_strategy_result(market_slug="slug-b", condition_id="0xb", resolved=False),
-        _make_strategy_result(market_slug="slug-c", condition_id="0xc", resolved=True, resolved_outcome="win"),
+        _make_strategy_result(market_slug="slug-a", condition_id="0xaaa", token_id="tid_a", resolved=False),
+        _make_strategy_result(market_slug="slug-b", condition_id="0xbbb", token_id="tid_b", resolved=False),
+        _make_strategy_result(market_slug="slug-c", condition_id="0xccc", token_id="tid_c", resolved=True, resolved_outcome="win"),
     ]
-    _write_jsonl(tmp_path / "run.jsonl", rows)
+    _write_jsonl(tmp_path / "weather_temp_live_run.jsonl", rows)
 
     entries = scan_unresolved_entries(tmp_path)
     assert len(entries) == 2
@@ -124,9 +135,9 @@ def test_scan_ignores_non_strategy_result_events(tmp_path: Path):
     rows = [
         {"event": "round_start", "market_slug": "slug-x"},
         {"event": "market_discovered", "market_slug": "slug-y"},
-        _make_strategy_result(market_slug="slug-z", condition_id="0xz"),
+        _make_strategy_result(market_slug="slug-z", condition_id="0xzzz", token_id="tid_z"),
     ]
-    _write_jsonl(tmp_path / "run.jsonl", rows)
+    _write_jsonl(tmp_path / "weather_temp_live_run.jsonl", rows)
 
     entries = scan_unresolved_entries(tmp_path)
     assert len(entries) == 1
@@ -134,10 +145,11 @@ def test_scan_ignores_non_strategy_result_events(tmp_path: Path):
 
 
 def test_compute_settlement_win():
-    """YES token at 0.72, market resolves YES wins => pnl = +2.8, outcome = win."""
+    """YES token at 0.72, market resolves YES => pnl = +2.8, outcome = win."""
     entry = UnresolvedEntry(
         market_slug="slug-a",
         condition_id="0xa",
+        token_id="tid_a",
         strategy_name="temp_70c_basic",
         arena="temp_70c",
         token_side="yes",
@@ -148,14 +160,8 @@ def test_compute_settlement_win():
         observation_date="2026-04-15",
         source_file="run.jsonl",
     )
-    resolution = MarketResolution(
-        condition_id="0xa",
-        slug="slug-a",
-        resolved=True,
-        winning_outcome="Yes",
-        resolution_price_yes=1.0,
-        resolution_price_no=0.0,
-    )
+    # settlement_price=1.0 means the YES token won (oracle resolution)
+    resolution = MarketResolution(token_id="tid_a", resolved=True, settlement_price=1.0)
     result = compute_settlement(entry, resolution)
     assert result is not None
     assert result["resolved"] is True
@@ -165,10 +171,11 @@ def test_compute_settlement_win():
 
 
 def test_compute_settlement_loss():
-    """YES token at 0.72, market resolves NO wins => pnl = -7.2, outcome = loss."""
+    """YES token at 0.72, market resolves NO (token settles at 0) => pnl = -7.2."""
     entry = UnresolvedEntry(
         market_slug="slug-a",
         condition_id="0xa",
+        token_id="tid_a",
         strategy_name="temp_70c_basic",
         arena="temp_70c",
         token_side="yes",
@@ -179,14 +186,8 @@ def test_compute_settlement_loss():
         observation_date="2026-04-15",
         source_file="run.jsonl",
     )
-    resolution = MarketResolution(
-        condition_id="0xa",
-        slug="slug-a",
-        resolved=True,
-        winning_outcome="No",
-        resolution_price_yes=0.0,
-        resolution_price_no=1.0,
-    )
+    # settlement_price=0.0 means the YES token lost
+    resolution = MarketResolution(token_id="tid_a", resolved=True, settlement_price=0.0)
     result = compute_settlement(entry, resolution)
     assert result is not None
     assert result["resolved"] is True
@@ -200,6 +201,7 @@ def test_compute_settlement_unresolved_returns_none():
     entry = UnresolvedEntry(
         market_slug="slug-a",
         condition_id="0xa",
+        token_id="tid_a",
         strategy_name="temp_70c_basic",
         arena="temp_70c",
         token_side="yes",
@@ -210,14 +212,7 @@ def test_compute_settlement_unresolved_returns_none():
         observation_date="2026-04-15",
         source_file="run.jsonl",
     )
-    resolution = MarketResolution(
-        condition_id="0xa",
-        slug="slug-a",
-        resolved=False,
-        winning_outcome=None,
-        resolution_price_yes=None,
-        resolution_price_no=None,
-    )
+    resolution = MarketResolution(token_id="tid_a", resolved=False, settlement_price=None)
     result = compute_settlement(entry, resolution)
     assert result is None
 
@@ -225,23 +220,16 @@ def test_compute_settlement_unresolved_returns_none():
 def test_settlement_loop_processes_and_exits(tmp_path: Path):
     """Loop resolves one market, writes settlement_update, exits after max_iterations=1."""
     rows = [
-        _make_strategy_result(market_slug="slug-a", condition_id="0xa"),
+        _make_strategy_result(market_slug="slug-a", condition_id="0xaaa", token_id="tid_a"),
     ]
-    _write_jsonl(tmp_path / "run.jsonl", rows)
+    _write_jsonl(tmp_path / "weather_temp_live_run.jsonl", rows)
 
-    writer = JsonlRunWriter(tmp_path / "settlement.jsonl")
+    writer = JsonlRunWriter(tmp_path / "settlement_live.jsonl")
 
-    resolution = MarketResolution(
-        condition_id="0xa",
-        slug="slug-a",
-        resolved=True,
-        winning_outcome="Yes",
-        resolution_price_yes=1.0,
-        resolution_price_no=0.0,
-    )
+    resolution = MarketResolution(token_id="tid_a", resolved=True, settlement_price=1.0)
 
-    async def fake_fetch(*, condition_id, **kwargs):
-        if condition_id == "0xa":
+    async def fake_fetch(*, token_id: str, **kwargs):
+        if token_id == "tid_a":
             return resolution
         return None
 
@@ -259,12 +247,12 @@ def test_settlement_loop_processes_and_exits(tmp_path: Path):
     )
 
     # Verify settlement_update was written
-    lines = (tmp_path / "settlement.jsonl").read_text().strip().split("\n")
+    lines = (tmp_path / "settlement_live.jsonl").read_text().strip().split("\n")
     events = [json.loads(line) for line in lines]
     settlement_events = [e for e in events if e.get("event") == "settlement_update"]
     assert len(settlement_events) == 1
     ev = settlement_events[0]
-    assert ev["condition_id"] == "0xa"
+    assert ev["market_slug"] == "slug-a"
     assert ev["resolved"] is True
     assert ev["resolved_outcome"] == "win"
     assert abs(ev["pnl"] - 2.8) < 1e-9
@@ -272,15 +260,15 @@ def test_settlement_loop_processes_and_exits(tmp_path: Path):
 
 def test_settlement_loop_skips_already_settled(tmp_path: Path):
     """Markets that already have a settlement_update in JSONL are not re-queried."""
-    # Write an unresolved strategy_result
-    _write_jsonl(tmp_path / "run.jsonl", [
-        _make_strategy_result(market_slug="slug-a", condition_id="0xa"),
+    _write_jsonl(tmp_path / "weather_temp_live_run.jsonl", [
+        _make_strategy_result(market_slug="slug-a", condition_id="0xaaa", token_id="tid_a"),
     ])
-    # Write a settlement_update for it already
-    _write_jsonl(tmp_path / "settlement.jsonl", [
+    # Write a settlement_update with token_id so it is picked up as already settled
+    _write_jsonl(tmp_path / "settlement_live.jsonl", [
         {
             "event": "settlement_update",
-            "condition_id": "0xa",
+            "token_id": "tid_a",
+            "condition_id": "0xaaa",
             "market_slug": "slug-a",
             "resolved": True,
             "resolved_outcome": "win",
@@ -288,12 +276,12 @@ def test_settlement_loop_skips_already_settled(tmp_path: Path):
         },
     ])
 
-    writer = JsonlRunWriter(tmp_path / "settlement.jsonl")
+    writer = JsonlRunWriter(tmp_path / "settlement_live.jsonl")
 
     fetch_called_for: list[str] = []
 
-    async def fake_fetch(*, condition_id, **kwargs):
-        fetch_called_for.append(condition_id)
+    async def fake_fetch(*, token_id: str, **kwargs):
+        fetch_called_for.append(token_id)
         return None
 
     asyncio.get_event_loop().run_until_complete(
@@ -307,8 +295,8 @@ def test_settlement_loop_skips_already_settled(tmp_path: Path):
         )
     )
 
-    # The already-settled condition_id should not have been fetched
-    assert "0xa" not in fetch_called_for
+    # The already-settled token_id should not have been fetched
+    assert "tid_a" not in fetch_called_for
 
 
 def test_pnl_calculation_no_token(tmp_path: Path):
@@ -316,6 +304,7 @@ def test_pnl_calculation_no_token(tmp_path: Path):
     entry = UnresolvedEntry(
         market_slug="slug-n",
         condition_id="0xn",
+        token_id="tid_n",
         strategy_name="temp_80c_basic",
         arena="temp_80c",
         token_side="no",
@@ -326,14 +315,8 @@ def test_pnl_calculation_no_token(tmp_path: Path):
         observation_date="2026-04-15",
         source_file="run.jsonl",
     )
-    resolution = MarketResolution(
-        condition_id="0xn",
-        slug="slug-n",
-        resolved=True,
-        winning_outcome="No",
-        resolution_price_yes=0.0,
-        resolution_price_no=1.0,
-    )
+    # For a NO token, resolution_price=1.0 means NO won (from CLOB perspective)
+    resolution = MarketResolution(token_id="tid_n", resolved=True, settlement_price=1.0)
     result = compute_settlement(entry, resolution)
     assert result is not None
     assert abs(result["pnl"] - 7.0) < 1e-9
@@ -367,10 +350,9 @@ def test_collect_redeemed_condition_ids_finds_completed():
     assert _collect_redeemed_condition_ids(all_rows) == {"0xabc", "0x123"}
 
 
-@pytest.mark.asyncio
-async def test_redeem_pending_wins_calls_fn_for_wins_only(tmp_path: Path):
+def test_redeem_pending_wins_calls_fn_for_wins_only(tmp_path: Path):
     """Calls redeem_fn for WIN condition_ids; skips LOSS settlements."""
-    _write_jsonl(tmp_path / "settlement.jsonl", [
+    _write_jsonl(tmp_path / "settlement_live.jsonl", [
         {
             "event": "settlement_update",
             "condition_id": "0xwin1",
@@ -380,6 +362,7 @@ async def test_redeem_pending_wins_calls_fn_for_wins_only(tmp_path: Path):
             "shares": 10.0,
             "resolved_outcome": "win",
             "resolved": True,
+            "real_order": True,
         },
         {
             "event": "settlement_update",
@@ -390,6 +373,7 @@ async def test_redeem_pending_wins_calls_fn_for_wins_only(tmp_path: Path):
             "shares": 10.0,
             "resolved_outcome": "loss",
             "resolved": True,
+            "real_order": True,
         },
     ])
 
@@ -400,11 +384,13 @@ async def test_redeem_pending_wins_calls_fn_for_wins_only(tmp_path: Path):
         redeemed.append(condition_id)
         return True, "0xfaketxhash"
 
-    await _redeem_pending_wins(
-        jsonl_dir=tmp_path,
-        writer=writer,
-        redeem_fn=fake_redeem,
-        now_fn=lambda: datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC),
+    asyncio.get_event_loop().run_until_complete(
+        _redeem_pending_wins(
+            jsonl_dir=tmp_path,
+            writer=writer,
+            redeem_fn=fake_redeem,
+            now_fn=lambda: datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC),
+        )
     )
 
     assert redeemed == ["0xwin1"]
@@ -415,10 +401,9 @@ async def test_redeem_pending_wins_calls_fn_for_wins_only(tmp_path: Path):
     assert events[0]["tx_hash"] == "0xfaketxhash"
 
 
-@pytest.mark.asyncio
-async def test_redeem_pending_wins_skips_already_completed(tmp_path: Path):
+def test_redeem_pending_wins_skips_already_completed(tmp_path: Path):
     """condition_ids with a redemption_completed event are never re-attempted."""
-    _write_jsonl(tmp_path / "settlement.jsonl", [
+    _write_jsonl(tmp_path / "settlement_live.jsonl", [
         {
             "event": "settlement_update",
             "condition_id": "0xwin1",
@@ -427,6 +412,7 @@ async def test_redeem_pending_wins_skips_already_completed(tmp_path: Path):
             "token_side": "yes",
             "shares": 10.0,
             "resolved": True,
+            "real_order": True,
         },
         {
             "event": "redemption_completed",
@@ -442,21 +428,22 @@ async def test_redeem_pending_wins_skips_already_completed(tmp_path: Path):
         redeemed.append(condition_id)
         return True, "0xnewtx"
 
-    await _redeem_pending_wins(
-        jsonl_dir=tmp_path,
-        writer=writer,
-        redeem_fn=fake_redeem,
-        now_fn=lambda: datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC),
+    asyncio.get_event_loop().run_until_complete(
+        _redeem_pending_wins(
+            jsonl_dir=tmp_path,
+            writer=writer,
+            redeem_fn=fake_redeem,
+            now_fn=lambda: datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC),
+        )
     )
 
     assert redeemed == []
     assert not (tmp_path / "redemption.jsonl").exists()
 
 
-@pytest.mark.asyncio
-async def test_redeem_pending_wins_writes_pending_on_failure(tmp_path: Path):
+def test_redeem_pending_wins_writes_pending_on_failure(tmp_path: Path):
     """On redemption failure (e.g. no MATIC), writes redemption_pending event."""
-    _write_jsonl(tmp_path / "settlement.jsonl", [
+    _write_jsonl(tmp_path / "settlement_live.jsonl", [
         {
             "event": "settlement_update",
             "condition_id": "0xwin1",
@@ -466,6 +453,7 @@ async def test_redeem_pending_wins_writes_pending_on_failure(tmp_path: Path):
             "shares": 5.0,
             "resolved_outcome": "win",
             "resolved": True,
+            "real_order": True,
         },
     ])
 
@@ -474,11 +462,13 @@ async def test_redeem_pending_wins_writes_pending_on_failure(tmp_path: Path):
     async def fake_redeem(*, condition_id: str, token_side: str) -> tuple[bool, str]:
         return False, "insufficient funds for gas * price + value"
 
-    await _redeem_pending_wins(
-        jsonl_dir=tmp_path,
-        writer=writer,
-        redeem_fn=fake_redeem,
-        now_fn=lambda: datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC),
+    asyncio.get_event_loop().run_until_complete(
+        _redeem_pending_wins(
+            jsonl_dir=tmp_path,
+            writer=writer,
+            redeem_fn=fake_redeem,
+            now_fn=lambda: datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC),
+        )
     )
 
     events = [json.loads(l) for l in (tmp_path / "redemption.jsonl").read_text().strip().split("\n")]
@@ -489,10 +479,9 @@ async def test_redeem_pending_wins_writes_pending_on_failure(tmp_path: Path):
     assert "insufficient funds" in ev["error"]
 
 
-@pytest.mark.asyncio
-async def test_redeem_pending_wins_deduplicates_condition_id(tmp_path: Path):
+def test_redeem_pending_wins_deduplicates_condition_id(tmp_path: Path):
     """Multiple WIN entries for the same condition_id trigger only one redemption."""
-    _write_jsonl(tmp_path / "settlement.jsonl", [
+    _write_jsonl(tmp_path / "settlement_live.jsonl", [
         {
             "event": "settlement_update",
             "condition_id": "0xwin1",
@@ -501,6 +490,7 @@ async def test_redeem_pending_wins_deduplicates_condition_id(tmp_path: Path):
             "token_side": "yes",
             "shares": 5.0,
             "resolved": True,
+            "real_order": True,
         },
         {
             "event": "settlement_update",
@@ -510,6 +500,7 @@ async def test_redeem_pending_wins_deduplicates_condition_id(tmp_path: Path):
             "token_side": "yes",
             "shares": 8.0,
             "resolved": True,
+            "real_order": True,
         },
     ])
 
@@ -520,11 +511,13 @@ async def test_redeem_pending_wins_deduplicates_condition_id(tmp_path: Path):
         call_count[0] += 1
         return True, "0xtx"
 
-    await _redeem_pending_wins(
-        jsonl_dir=tmp_path,
-        writer=writer,
-        redeem_fn=fake_redeem,
-        now_fn=lambda: datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC),
+    asyncio.get_event_loop().run_until_complete(
+        _redeem_pending_wins(
+            jsonl_dir=tmp_path,
+            writer=writer,
+            redeem_fn=fake_redeem,
+            now_fn=lambda: datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC),
+        )
     )
 
     assert call_count[0] == 1
