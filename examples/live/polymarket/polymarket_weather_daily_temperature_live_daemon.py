@@ -465,6 +465,7 @@ def _flush_new_positions(
                     "asset_class": "weather",
                     "weather_market_type": "daily_temperature",
                     "preset_name": preset.name,
+                    "strategy_name": preset.name,  # canonical field for leaderboard/reports
                     "arena": preset.arena,
                     "mode": preset.mode,
                     "market_slug": market.slug,
@@ -794,6 +795,7 @@ async def _run_direct_clob_entry_session(
                     "asset_class": "weather",
                     "weather_market_type": "daily_temperature",
                     "preset_name": preset_name,
+                    "strategy_name": preset_name,  # canonical field for leaderboard/reports
                     "arena": arena,
                     "mode": "basic",
                     "market_slug": slug,

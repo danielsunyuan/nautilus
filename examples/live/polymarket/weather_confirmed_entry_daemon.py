@@ -115,6 +115,7 @@ def _build_confirmed_entry_event(
         "asset_class": "weather",
         "weather_market_type": "daily_temperature",
         "preset_name": signal.preset_name,
+        "strategy_name": signal.preset_name,  # canonical field for leaderboard/reports
         "arena": signal.arena,
         "mode": "confirmed",
         "market_slug": signal.market_slug,
@@ -140,6 +141,7 @@ def _build_confirmed_entry_event(
         "wu_as_of_utc": signal.wu_as_of_utc,
         "timestamp": ts,
         "clob_response": str(clob_response),
+        "real_order": True,  # distinguishes real CLOB fills from paper sandbox entries
     }
 
 
@@ -156,8 +158,17 @@ async def _run_poll_cycle(
     entered_this_run: set[tuple[str, str]],
     output_dir: Path,
     session_trading_day,
-) -> Decimal:
-    """Core poll cycle: fetch obs, evaluate signals, submit orders."""
+) -> tuple[Decimal, float]:
+    """Core poll cycle: fetch obs, evaluate signals, submit orders.
+
+    Temperature-ladder strategy:
+    - One fetch per unique city (not per market) — avoids redundant API calls.
+    - Markets processed highest threshold first per city (intra-city sort only).
+    - A1 (or_higher YES): once entered for a city this cycle, lower thresholds skipped.
+    - B2 (or_higher NO): suppressed if daily_max >= threshold (temperature already reached it).
+
+    Returns (budget_remaining, next_poll_secs) computed from fresh observations.
+    """
     import httpx as _httpx
     from py_clob_client.clob_types import MarketOrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY
@@ -168,38 +179,99 @@ async def _run_poll_cycle(
         clob_client = await asyncio.to_thread(_build_clob_client_for_entry)
     except Exception as exc:
         _log.error("Failed to build CLOB client: %s", exc)
-        return budget_remaining
+        next_poll_secs = _next_poll_secs(markets, latest_obs)
+        return budget_remaining, next_poll_secs
+
+    # --- Phase 1: Pre-fetch observations — one fetch per unique city ---
+    unique_cities = {m.city for m in markets}
+    # Snapshot prev daily_max values before updating latest_obs this cycle
+    prev_obs: dict[str, float | None] = {
+        city: (latest_obs[city].daily_max if city in latest_obs else None)
+        for city in unique_cities
+    }
+    # Track which cities received a fresh observation this cycle.
+    # Cities that fail (exception or None) are excluded from Phase 2 to prevent
+    # stale cached observations from advancing ConfirmTracker counts.
+    cities_with_fresh_obs: set[str] = set()
+    for city in unique_cities:
+        try:
+            obs = await fetch_daily_high(city)
+        except Exception as exc:
+            _log.warning("fetch_daily_high failed for %s: %s", city, exc)
+            continue
+        if obs is None:
+            _log.warning("No observation available for %s", city)
+            continue
+        latest_obs[city] = obs
+        cities_with_fresh_obs.add(city)
+
+    # Compute next_poll_secs from the freshly-updated latest_obs so that
+    # the first-cycle cadence reflects real data, not pre-fetch stale state.
+    next_poll_secs = _next_poll_secs(markets, latest_obs)
+
+    # --- Phase 2: Process markets — highest threshold first within each city ---
+    # Intra-city sort only: sort descending threshold within each city's slice
+    # while preserving the original cross-city ordering from the resolver.
+    # This ensures the A1 ladder enters the most-confirmed (highest) rung first
+    # without unexpectedly changing cross-city budget priority.
+    city_order: list[str] = []
+    seen_cities: set[str] = set()
+    for m in markets:
+        if m.city not in seen_cities:
+            city_order.append(m.city)
+            seen_cities.add(m.city)
+    city_rank = {city: i for i, city in enumerate(city_order)}
+    sorted_markets = sorted(markets, key=lambda m: (city_rank[m.city], -m.threshold_f))
+
+    # Per-cycle set: cities for which an A1 entry has already been made this cycle.
+    # Latched only after a candidate passes all gating checks AND order submission
+    # succeeds (or dry_run is accepted), so a higher rung that fails gating does
+    # not suppress eligible lower rungs.
+    city_a1_entered: set[str] = set()
 
     async with _httpx.AsyncClient(timeout=10.0) as http:
-        for market in markets:
+        for market in sorted_markets:
             if budget_remaining <= Decimal("0"):
                 break
 
             city = market.city
+
+            # Skip cities that did not receive a fresh observation this cycle.
+            # This prevents stale cached observations from advancing ConfirmTracker.
+            if city not in cities_with_fresh_obs:
+                _log.debug(
+                    "SKIP %s  no fresh obs for %s this cycle (stale-fetch guard)",
+                    market.slug, city,
+                )
+                continue
+
             city_info = CITY_STATIONS.get(city)
             if not city_info:
                 _log.warning("No CITY_STATIONS entry for %s, skipping", city)
                 continue
 
-            station, iso2, unit, oracle_type = city_info
+            _, _, unit, _ = city_info
 
-            # Fetch latest observation
-            try:
-                obs = await fetch_daily_high(city)
-            except Exception as exc:
-                _log.warning("fetch_daily_high failed for %s: %s", city, exc)
-                continue
-
+            obs = latest_obs.get(city)
             if obs is None:
-                _log.warning("No observation available for %s", city)
                 continue
 
-            # Track previous observation for spike detection
-            prev_max = latest_obs.get(city).daily_max if city in latest_obs else None
-            latest_obs[city] = obs
+            safety_margin = SAFETY_MARGIN_F if unit == "F" else SAFETY_MARGIN_C
+
+            # Temperature-ladder gate: once A1 has fired for a city this cycle,
+            # skip lower or_higher thresholds — but still update confirm tracker.
+            if city in city_a1_entered and market.band_type == "or_higher":
+                _log.debug(
+                    "SKIP %s  ladder: A1 already entered for %s at higher threshold this cycle",
+                    market.slug, city,
+                )
+                a1_breach = obs.daily_max >= market.threshold_f + safety_margin
+                confirm_tracker.record(market.slug, "A1", a1_breach)
+                continue
+
+            prev_max = prev_obs.get(city)
 
             # Compute confirmation counts for A1 and A2 independently
-            safety_margin = SAFETY_MARGIN_F if unit == "F" else SAFETY_MARGIN_C
             a1_breach = obs.daily_max >= market.threshold_f + safety_margin
             confirm_tracker.record(market.slug, "A1", a1_breach)
             a1_count = confirm_tracker.get(market.slug, "A1")
@@ -210,10 +282,8 @@ async def _run_poll_cycle(
 
             confirm_counts = {"A1": a1_count, "A2": a2_count}
 
-            # Get city timezone for B2 evaluation
             city_tz = _CITY_TIMEZONES.get(city, "UTC")
 
-            # Build signal
             signal = build_signal(
                 market,
                 obs.daily_max,
@@ -226,6 +296,15 @@ async def _run_poll_cycle(
             )
 
             if signal is None:
+                continue
+
+            # B2 NO gate: never short a threshold the temperature has already
+            # reached or exceeded — it could still resolve YES from here.
+            if signal.strategy == "B2" and obs.daily_max >= market.threshold_f:
+                _log.info(
+                    "SKIP %s [B2-gate]  daily_max=%.2f >= threshold=%.2f (reachable)",
+                    market.slug, obs.daily_max, market.threshold_f,
+                )
                 continue
 
             # Skip if already entered this session (main loop pre-filters, but guard here too)
@@ -298,6 +377,12 @@ async def _run_poll_cycle(
                     _log.error("BUY FAILED for %s [%s]: %s", market.slug, signal.token_side, exc)
                     continue
 
+            # A1 ladder: latch city only after all gating checks pass and order
+            # submission succeeds (or dry_run).  This prevents a higher rung that
+            # fails quote/price/budget gating from suppressing eligible lower rungs.
+            if signal.strategy == "A1":
+                city_a1_entered.add(city)
+
             # Write event
             writer.write(
                 _build_confirmed_entry_event(
@@ -317,7 +402,7 @@ async def _run_poll_cycle(
             entered_this_run.add((market.slug, signal.token_side))
             budget_remaining -= stake
 
-    return budget_remaining
+    return budget_remaining, next_poll_secs
 
 
 async def _run_main_loop(
@@ -373,13 +458,13 @@ async def _run_main_loop(
             if not any((m.slug, side) in entered_this_session for side in ("yes", "no"))
         ]
 
-        # Determine poll interval
-        if tradeable:
-            poll_secs = _next_poll_secs(tradeable, latest_obs)
-        else:
-            poll_secs = 900.0
+        # poll_secs is computed inside _run_poll_cycle from freshly-fetched obs.
+        # We default to 900.0 for the poll_cycle event timestamp; the actual sleep
+        # uses the value returned by _run_poll_cycle so the first cycle reflects
+        # real data, not stale state from before the fetch.
+        poll_secs = 900.0
 
-        # Write poll_cycle event
+        # Write poll_cycle event (poll_interval_secs updated below after cycle)
         writer.write(
             {
                 "run_id": run_id,
@@ -394,7 +479,7 @@ async def _run_main_loop(
 
         # Run poll cycle if there are tradeable markets
         if tradeable:
-            budget = await _run_poll_cycle(
+            budget, poll_secs = await _run_poll_cycle(
                 markets=tradeable,
                 writer=writer,
                 run_id=run_id,

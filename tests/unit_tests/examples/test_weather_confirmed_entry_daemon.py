@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -17,6 +18,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from examples.live.polymarket.weather_wunderground_fetcher import StationObs
+from examples.live.polymarket.weather_confirmed_signal import ConfirmTracker
 
 
 # Define functions locally to avoid importing compiled Nautilus
@@ -67,6 +69,7 @@ def _build_confirmed_entry_event(
         "asset_class": "weather",
         "weather_market_type": "daily_temperature",
         "preset_name": signal.preset_name,
+        "strategy_name": signal.preset_name,  # canonical field for leaderboard/reports
         "arena": signal.arena,
         "mode": "confirmed",
         "market_slug": signal.market_slug,
@@ -224,6 +227,7 @@ class TestBuildConfirmedEntryEvent:
         assert event["asset_class"] == "weather"
         assert event["weather_market_type"] == "daily_temperature"
         assert event["preset_name"] == "temp_confirmed_a1"
+        assert event["strategy_name"] == "temp_confirmed_a1"
         assert event["arena"] == "temp_confirmed"
         assert event["mode"] == "confirmed"
         assert event["market_slug"] == "test-slug"
@@ -318,3 +322,371 @@ class TestBuildConfirmedEntryEvent:
 
         assert event["strategy_type"] == "B2"
         assert event["strategy_type"] in ("A1", "A2", "B2")
+
+
+# ---------------------------------------------------------------------------
+# Helpers for _run_poll_cycle tests
+# ---------------------------------------------------------------------------
+
+def _make_obs(city: str, daily_max: float, unit: str = "F") -> StationObs:
+    """Construct a StationObs for testing."""
+    return StationObs(
+        city=city,
+        station="TEST",
+        daily_max=daily_max,
+        unit=unit,
+        obs_count=12,
+        as_of_utc=datetime.now(UTC),
+        oracle_type="wu",
+        fetch_source="twc_historical",
+    )
+
+
+def _make_market(city: str, threshold_f: float, band_type: str = "or_higher", slug: str | None = None) -> MagicMock:
+    """Construct a minimal mock DailyTemperatureMarket."""
+    m = MagicMock()
+    m.city = city
+    m.threshold_f = threshold_f
+    m.band_type = band_type
+    m.slug = slug or f"{city.lower().replace(' ', '-')}-{int(threshold_f)}"
+    m.condition_id = f"COND-{m.slug}"
+    m.yes_token_id = f"YES-{m.slug}"
+    m.no_token_id = f"NO-{m.slug}"
+    m.metric = "high"
+    m.observation_date = "2026-04-22"
+    return m
+
+
+# Minimal reimplementation of _run_poll_cycle logic for unit testing.
+# Mirrors the production code but replaces I/O (fetch_daily_high, CLOB) with
+# injectable callables so tests stay synchronous-friendly via asyncio.run().
+
+SAFETY_MARGIN_F = 1.0
+SAFETY_MARGIN_C = 0.5
+
+
+async def _run_poll_cycle_local(
+    *,
+    markets: list,
+    confirm_tracker: ConfirmTracker,
+    latest_obs: dict,
+    fetch_fn,          # async callable(city) -> StationObs | None
+    signal_fn=None,    # optional callable(market, obs) -> signal | None
+) -> tuple[dict, float]:
+    """Stripped _run_poll_cycle for unit tests: no CLOB, no writer, no I/O.
+
+    Returns (cities_with_fresh_obs_dict, next_poll_secs).
+    cities_with_fresh_obs_dict maps city -> obs that were fetched this cycle.
+    """
+    unique_cities = {m.city for m in markets}
+    prev_obs = {
+        city: (latest_obs[city].daily_max if city in latest_obs else None)
+        for city in unique_cities
+    }
+    cities_with_fresh_obs: set[str] = set()
+    for city in unique_cities:
+        try:
+            obs = await fetch_fn(city)
+        except Exception:
+            continue
+        if obs is None:
+            continue
+        latest_obs[city] = obs
+        cities_with_fresh_obs.add(city)
+
+    # Compute next_poll_secs from fresh obs
+    next_poll_secs_val = _next_poll_secs(markets, latest_obs)
+
+    # Intra-city sort only
+    city_order: list[str] = []
+    seen_cities: set[str] = set()
+    for m in markets:
+        if m.city not in seen_cities:
+            city_order.append(m.city)
+            seen_cities.add(m.city)
+    city_rank = {city: i for i, city in enumerate(city_order)}
+    sorted_markets = sorted(markets, key=lambda m: (city_rank[m.city], -m.threshold_f))
+
+    city_a1_entered: set[str] = set()
+    signals_evaluated: list[tuple] = []
+
+    for market in sorted_markets:
+        city = market.city
+        if city not in cities_with_fresh_obs:
+            continue
+        city_info = CITY_STATIONS.get(city)
+        if not city_info:
+            continue
+        _, _, unit, _ = city_info
+        obs = latest_obs.get(city)
+        if obs is None:
+            continue
+        safety_margin = SAFETY_MARGIN_F if unit == "F" else SAFETY_MARGIN_C
+
+        if city in city_a1_entered and market.band_type == "or_higher":
+            a1_breach = obs.daily_max >= market.threshold_f + safety_margin
+            confirm_tracker.record(market.slug, "A1", a1_breach)
+            continue
+
+        prev_max = prev_obs.get(city)
+        a1_breach = obs.daily_max >= market.threshold_f + safety_margin
+        confirm_tracker.record(market.slug, "A1", a1_breach)
+        a1_count = confirm_tracker.get(market.slug, "A1")
+
+        a2_breach = obs.daily_max > (market.threshold_f + 1.0) + safety_margin
+        confirm_tracker.record(market.slug, "A2", a2_breach)
+        a2_count = confirm_tracker.get(market.slug, "A2")
+
+        # Track what signal_fn sees
+        if signal_fn is not None:
+            sig = signal_fn(market, obs, {"A1": a1_count, "A2": a2_count})
+            if sig is not None:
+                signals_evaluated.append((market.slug, sig))
+                # A1 ladder latch after all gating — here we latch immediately
+                # since tests don't do CLOB/budget checks
+                if getattr(sig, "strategy", None) == "A1":
+                    city_a1_entered.add(city)
+
+    return {
+        "cities_with_fresh_obs": cities_with_fresh_obs,
+        "signals_evaluated": signals_evaluated,
+        "city_a1_entered": city_a1_entered,
+        "sorted_market_slugs": [m.slug for m in sorted_markets],
+    }, next_poll_secs_val
+
+
+# ---------------------------------------------------------------------------
+# Test: one fetch per unique city
+# ---------------------------------------------------------------------------
+
+class TestRunPollCycleOneFetchPerCity:
+    """Phase 1 issues exactly one fetch per unique city, not per market."""
+
+    def test_one_fetch_per_unique_city(self):
+        # Two markets for NYC, one for Austin
+        m1 = _make_market("NYC", 70.0, slug="nyc-70")
+        m2 = _make_market("NYC", 75.0, slug="nyc-75")
+        m3 = _make_market("Austin", 90.0, slug="austin-90")
+
+        fetch_calls: list[str] = []
+
+        async def fetch_fn(city: str) -> StationObs:
+            fetch_calls.append(city)
+            return _make_obs(city, 71.0)
+
+        result, _ = asyncio.get_event_loop().run_until_complete(
+            _run_poll_cycle_local(
+                markets=[m1, m2, m3],
+                confirm_tracker=ConfirmTracker(),
+                latest_obs={},
+                fetch_fn=fetch_fn,
+            )
+        )
+
+        # Exactly one call per unique city
+        assert sorted(fetch_calls) == sorted(["NYC", "Austin"])
+        assert len(fetch_calls) == 2
+        assert result["cities_with_fresh_obs"] == {"NYC", "Austin"}
+
+
+# ---------------------------------------------------------------------------
+# Test: stale fetch miss does not advance confirmation count
+# ---------------------------------------------------------------------------
+
+class TestRunPollCycleStaleFetchMiss:
+    """If a city fetch fails or returns None, confirm tracker must not advance."""
+
+    def test_failed_fetch_does_not_advance_confirm_count(self):
+        m = _make_market("NYC", 70.0, slug="nyc-70")
+
+        # Seed stale observation for NYC (simulates previous cycle's cached value)
+        stale_obs = _make_obs("NYC", 71.5)
+        latest_obs = {"NYC": stale_obs}
+        tracker = ConfirmTracker()
+
+        async def fetch_fn(city: str):
+            raise RuntimeError("network error")
+
+        result, _ = asyncio.get_event_loop().run_until_complete(
+            _run_poll_cycle_local(
+                markets=[m],
+                confirm_tracker=tracker,
+                latest_obs=latest_obs,
+                fetch_fn=fetch_fn,
+            )
+        )
+
+        # City did not receive fresh obs — tracker must not have been called
+        assert result["cities_with_fresh_obs"] == set()
+        assert tracker.get("nyc-70", "A1") == 0
+
+    def test_none_fetch_does_not_advance_confirm_count(self):
+        m = _make_market("NYC", 70.0, slug="nyc-70")
+
+        stale_obs = _make_obs("NYC", 71.5)
+        latest_obs = {"NYC": stale_obs}
+        tracker = ConfirmTracker()
+
+        async def fetch_fn(city: str):
+            return None  # simulates "no data available"
+
+        result, _ = asyncio.get_event_loop().run_until_complete(
+            _run_poll_cycle_local(
+                markets=[m],
+                confirm_tracker=tracker,
+                latest_obs=latest_obs,
+                fetch_fn=fetch_fn,
+            )
+        )
+
+        assert result["cities_with_fresh_obs"] == set()
+        assert tracker.get("nyc-70", "A1") == 0
+
+
+# ---------------------------------------------------------------------------
+# Test: higher rung rejected, lower rung still eligible
+# ---------------------------------------------------------------------------
+
+class TestRunPollCycleA1LatchAfterGating:
+    """A1 latch fires only after gating checks pass; failed higher rung does not
+    suppress lower rungs for the same city."""
+
+    def test_higher_rung_without_signal_does_not_latch(self):
+        """If build_signal returns None for the higher rung, city_a1_entered is NOT latched
+        and the lower rung can still be evaluated."""
+        # NYC: 75F threshold (higher) + 70F threshold (lower)
+        m_high = _make_market("NYC", 75.0, slug="nyc-75")
+        m_low  = _make_market("NYC", 70.0, slug="nyc-70")
+
+        # daily_max = 72F — above 70+1=71 (A1 breach for 70 threshold) but NOT above 75+1=76
+        # So higher rung (75) does NOT fire A1; lower rung (70) DOES fire A1
+
+        async def fetch_fn(city: str) -> StationObs:
+            return _make_obs(city, 72.0)  # 72°F
+
+        def signal_fn(market, obs, confirm_counts):
+            sig = MagicMock()
+            # A1 fires only for the 70F threshold (72 >= 70+1=71)
+            if market.slug == "nyc-70" and obs.daily_max >= market.threshold_f + SAFETY_MARGIN_F:
+                sig.strategy = "A1"
+                return sig
+            return None  # higher rung: no signal
+
+        tracker = ConfirmTracker()
+        result, _ = asyncio.get_event_loop().run_until_complete(
+            _run_poll_cycle_local(
+                markets=[m_high, m_low],
+                confirm_tracker=tracker,
+                latest_obs={},
+                fetch_fn=fetch_fn,
+                signal_fn=signal_fn,
+            )
+        )
+
+        # Lower rung should have been evaluated (not suppressed by higher rung)
+        evaluated_slugs = [slug for slug, _ in result["signals_evaluated"]]
+        assert "nyc-70" in evaluated_slugs
+        assert "nyc-75" not in evaluated_slugs  # signal_fn returned None for it
+
+
+# ---------------------------------------------------------------------------
+# Test: fresh obs drive first-cycle 300s polling
+# ---------------------------------------------------------------------------
+
+class TestRunPollCycleFirstCycleCadence:
+    """next_poll_secs is derived from freshly-fetched observations, not pre-fetch state."""
+
+    def test_first_cycle_returns_300s_when_near_threshold(self):
+        """With no prior obs, first fetch returning a near-threshold value must
+        produce 300s cadence, not the pre-fetch 900s default."""
+        m = _make_market("NYC", 70.0, slug="nyc-70")
+        latest_obs: dict = {}  # empty on first run
+
+        async def fetch_fn(city: str) -> StationObs:
+            # 70.5°F — within 4°F of the 70°F threshold → should trigger 300s
+            return _make_obs(city, 70.5)
+
+        _, next_poll = asyncio.get_event_loop().run_until_complete(
+            _run_poll_cycle_local(
+                markets=[m],
+                confirm_tracker=ConfirmTracker(),
+                latest_obs=latest_obs,
+                fetch_fn=fetch_fn,
+            )
+        )
+
+        assert next_poll == 300.0
+
+    def test_first_cycle_returns_900s_when_far_from_threshold(self):
+        m = _make_market("NYC", 70.0, slug="nyc-70")
+        latest_obs: dict = {}
+
+        async def fetch_fn(city: str) -> StationObs:
+            return _make_obs(city, 55.0)  # far from 70°F
+
+        _, next_poll = asyncio.get_event_loop().run_until_complete(
+            _run_poll_cycle_local(
+                markets=[m],
+                confirm_tracker=ConfirmTracker(),
+                latest_obs=latest_obs,
+                fetch_fn=fetch_fn,
+            )
+        )
+
+        assert next_poll == 900.0
+
+
+# ---------------------------------------------------------------------------
+# Test: cross-city ordering behavior
+# ---------------------------------------------------------------------------
+
+class TestRunPollCycleCrossCityOrdering:
+    """Cross-city market ordering preserves resolver order; intra-city sorts
+    descending by threshold so the highest rung is processed first."""
+
+    def test_intra_city_sorted_descending_by_threshold(self):
+        """Within each city, higher thresholds come first in sorted_markets."""
+        m1 = _make_market("NYC", 70.0, slug="nyc-70")
+        m2 = _make_market("NYC", 75.0, slug="nyc-75")
+        m3 = _make_market("NYC", 80.0, slug="nyc-80")
+
+        async def fetch_fn(city: str) -> StationObs:
+            return _make_obs(city, 60.0)
+
+        result, _ = asyncio.get_event_loop().run_until_complete(
+            _run_poll_cycle_local(
+                markets=[m1, m2, m3],
+                confirm_tracker=ConfirmTracker(),
+                latest_obs={},
+                fetch_fn=fetch_fn,
+            )
+        )
+
+        slugs = result["sorted_market_slugs"]
+        assert slugs == ["nyc-80", "nyc-75", "nyc-70"]
+
+    def test_cross_city_order_preserved_from_resolver(self):
+        """Cities appear in the same relative order as the original market list."""
+        m_austin = _make_market("Austin", 90.0, slug="austin-90")
+        m_nyc    = _make_market("NYC",    70.0, slug="nyc-70")
+        m_london = _make_market("London", 20.0, slug="london-20")
+
+        async def fetch_fn(city: str) -> StationObs:
+            return _make_obs(city, 50.0)
+
+        # Resolver delivers Austin first, then NYC, then London
+        result, _ = asyncio.get_event_loop().run_until_complete(
+            _run_poll_cycle_local(
+                markets=[m_austin, m_nyc, m_london],
+                confirm_tracker=ConfirmTracker(),
+                latest_obs={},
+                fetch_fn=fetch_fn,
+            )
+        )
+
+        slugs = result["sorted_market_slugs"]
+        # Cross-city order must match resolver order: Austin → NYC → London
+        austin_idx = slugs.index("austin-90")
+        nyc_idx    = slugs.index("nyc-70")
+        london_idx = slugs.index("london-20")
+        assert austin_idx < nyc_idx < london_idx
