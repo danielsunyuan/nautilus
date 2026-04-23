@@ -56,10 +56,19 @@ def _ensure_nautilus_stubs():
     # Core nautilus_trader stubs
     for mod_name in [
         "nautilus_trader",
+        "nautilus_trader.cache",
+        "nautilus_trader.cache.cache",
+        "nautilus_trader.common",
+        "nautilus_trader.common.component",
+        "nautilus_trader.common.config",
         "nautilus_trader.core",
         "nautilus_trader.core.data",
         "nautilus_trader.core.nautilus_pyo3",
         "nautilus_trader.core.datetime",
+        "nautilus_trader.data",
+        "nautilus_trader.data.messages",
+        "nautilus_trader.live.data_client",
+        "nautilus_trader.live.factories",
         "nautilus_trader.model",
         "nautilus_trader.model.data",
         "nautilus_trader.model.enums",
@@ -174,7 +183,59 @@ def _ensure_nautilus_stubs():
             pass
     sys.modules["nautilus_trader.trading.strategy"].Strategy = _FakeStrategy
 
+    class _FakeData:
+        def __init__(self, *args, **kwargs):
+            pass
+    sys.modules["nautilus_trader.core.data"].Data = _FakeData
+
+    class _FakeCache:
+        pass
+    sys.modules["nautilus_trader.cache.cache"].Cache = _FakeCache
+
+    class _FakeLiveClock:
+        def timestamp_ns(self):
+            return 0
+    sys.modules["nautilus_trader.common.component"].LiveClock = _FakeLiveClock
+
+    class _FakeMessageBus:
+        pass
+    sys.modules["nautilus_trader.common.component"].MessageBus = _FakeMessageBus
+
+    class _FakeNautilusConfig:
+        def __init_subclass__(cls, **kwargs):
+            pass
+    sys.modules["nautilus_trader.common.config"].NautilusConfig = _FakeNautilusConfig
+
+    class _FakeSubscribeData:
+        pass
+    sys.modules["nautilus_trader.data.messages"].SubscribeData = _FakeSubscribeData
+    sys.modules["nautilus_trader.data.messages"].UnsubscribeData = _FakeSubscribeData
+
+    class _FakeLiveDataClient:
+        def __init__(self, *args, **kwargs):
+            self._clock = _FakeLiveClock()
+            self._log = MagicMock()
+        def create_task(self, coro, log_msg=""):
+            return MagicMock()
+        def _handle_data(self, update):
+            return None
+    sys.modules["nautilus_trader.live.data_client"].LiveDataClient = _FakeLiveDataClient
+
+    class _FakeLiveDataClientFactory:
+        pass
+    sys.modules["nautilus_trader.live.factories"].LiveDataClientFactory = _FakeLiveDataClientFactory
+
     sys.modules["nautilus_trader.model.enums"].OrderSide = SimpleNamespace(BUY="BUY", SELL="SELL")
+
+    class _FakeClientId:
+        def __init__(self, value):
+            self.value = value
+    sys.modules["nautilus_trader.model.identifiers"].ClientId = _FakeClientId
+
+    class _FakeVenueId:
+        def __init__(self, value="POLYMARKET"):
+            self.value = value
+    sys.modules["nautilus_trader.model.identifiers"].Venue = _FakeVenueId
 
     return stubs
 
@@ -217,6 +278,66 @@ def _fake_market(
         active=True,
         accepting_orders=True,
     )
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+
+
+class TestLiveBudgetAccounting:
+
+    def test_compute_total_deployed_counts_only_unresolved_open_exposure(self, tmp_path: Path) -> None:
+        runs_dir = tmp_path / "polymarket" / "runs"
+        _write_jsonl(
+            runs_dir / "weather_temp_live_live_90_basic_20260422T110327Z.jsonl",
+            [
+                {
+                    "event": "strategy_result",
+                    "timestamp": "2026-04-22T11:03:27+00:00",
+                    "market_slug": "still-open",
+                    "instrument_id": "cond-open-token-open.POLYMARKET",
+                    "observation_date": "2026-04-22",
+                    "strategy_name": "temp_90c_basic",
+                    "accounting_status": "open",
+                    "stake": 2.0,
+                },
+                {
+                    "event": "strategy_result",
+                    "timestamp": "2026-04-22T11:04:27+00:00",
+                    "market_slug": "already-closed",
+                    "instrument_id": "cond-closed-token-closed.POLYMARKET",
+                    "observation_date": "2026-04-22",
+                    "strategy_name": "temp_90c_basic",
+                    "accounting_status": "open",
+                    "stake": 2.0,
+                },
+            ],
+        )
+        _write_jsonl(
+            runs_dir / "take_profit.jsonl",
+            [
+                {
+                    "event": "settlement_update",
+                    "timestamp": "2026-04-22T12:00:00+00:00",
+                    "market_slug": "already-closed",
+                    "instrument_id": "cond-closed-token-closed.POLYMARKET",
+                    "observation_date": "2026-04-22",
+                    "strategy_name": "temp_90c_basic",
+                    "resolved": True,
+                },
+            ],
+        )
+
+        deployed = daemon._compute_total_deployed(
+            tmp_path,
+            "live_live_90_basic",
+            date=date(2026, 4, 22),
+        )
+
+        assert deployed == 2.0
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:

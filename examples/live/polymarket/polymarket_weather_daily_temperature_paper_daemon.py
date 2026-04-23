@@ -194,17 +194,43 @@ def _compute_total_deployed(
     preset_set_prefix: str,
     date=None,
 ) -> Decimal:
-    """Sum stake values from strategy_result events across JSONL files for this daemon.
+    """Sum unresolved open stake values across JSONL files for this daemon.
 
     When *date* is provided (a datetime.date), only events whose ``timestamp``
     starts with that date's ISO prefix (YYYY-MM-DD) are counted.  This enables
     a per-day budget cap — the default ``--capital-budget`` semantics.
+
+    Positions that already have a settlement row in ``take_profit.jsonl`` or
+    ``settlement_live.jsonl`` are excluded so live daemons can recycle capital
+    within the same session instead of treating closed trades as still deployed.
     """
+    def _position_key(obj: dict) -> tuple[str | None, str | None, str | None]:
+        return (
+            obj.get("instrument_id"),
+            obj.get("market_slug"),
+            obj.get("strategy_name") or obj.get("preset_name"),
+        )
+
     total = Decimal("0")
     runs_dir = Path(output_dir).resolve(strict=False) / "polymarket" / "runs"
     if not runs_dir.exists():
         return total
     date_prefix: str | None = date.isoformat() if date is not None else None
+    settled_positions: set[tuple[str | None, str | None, str | None]] = set()
+
+    for settlement_name in ("take_profit.jsonl", "settlement_live.jsonl"):
+        settlement_path = runs_dir / settlement_name
+        if not settlement_path.exists():
+            continue
+        try:
+            with settlement_path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    obj = json.loads(line)
+                    if obj.get("event") == "settlement_update":
+                        settled_positions.add(_position_key(obj))
+        except Exception:
+            pass
+
     for path in runs_dir.glob(f"*{preset_set_prefix}*.jsonl"):
         try:
             with path.open(encoding="utf-8") as fh:
@@ -215,6 +241,10 @@ def _compute_total_deployed(
                             ts = obj.get("timestamp", "")
                             if not str(ts).startswith(date_prefix):
                                 continue
+                        if obj.get("accounting_status") != "open":
+                            continue
+                        if _position_key(obj) in settled_positions:
+                            continue
                         stake = obj.get("stake")
                         if stake is not None:
                             total += Decimal(str(stake))
