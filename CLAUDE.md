@@ -275,30 +275,30 @@ Two images are used:
 | `balance-monitor` | `monitor` | Show Polymarket wallet balances |
 | `execution-check` | `execution` | Geoblock preflight + smoke test |
 
-### Rebuild Process
+### Container Image
 
-The `nautilus-trader:latest` image compiles Nautilus from Rust/Cython source (~20 min full build). For **pure Python changes** (adapters, fee models, configs), patch the image in-place:
+The compiled Rust/Cython engine is published to GHCR. Strategy code (Python) is volume-mounted from the git repo at runtime — no rebuild needed for Python changes.
+
+**Registry:** `ghcr.io/danielsunyuan/nautilus-trader`
+**Source:** `github.com/danielsunyuan/nautilus_trader` (branch: `develop`)
 
 ```bash
-# 1. Stop daemon
-docker compose -f .docker/docker-compose.yml --profile vpn stop papertrade-daemon-vpn
+# Pull the pre-built image (no 20-min compile)
+docker pull ghcr.io/danielsunyuan/nautilus-trader:latest
+docker tag ghcr.io/danielsunyuan/nautilus-trader:latest nautilus-trader:latest
 
-# 2. Patch pure Python files into existing image (seconds, not minutes)
-SITE="/usr/local/lib/python3.13/site-packages/nautilus_trader"
-docker create --name nautilus-patch nautilus-trader:latest sleep infinity
-docker cp nautilus_trader/adapters/polymarket/fee_model.py nautilus-patch:${SITE}/adapters/polymarket/fee_model.py
-# ... copy other changed .py files ...
-docker tag nautilus-trader:latest nautilus-trader:pre-patch
-docker commit nautilus-patch nautilus-trader:latest
-docker rm nautilus-patch
-
-# 3. Restart
-docker compose -f .docker/docker-compose.yml --profile vpn up -d papertrade-daemon-vpn
+# Push a new image version (from build machine only)
+docker tag nautilus-trader:latest ghcr.io/danielsunyuan/nautilus-trader:latest
+docker tag nautilus-trader:latest ghcr.io/danielsunyuan/nautilus-trader:$(date +%Y-%m-%d)
+docker push ghcr.io/danielsunyuan/nautilus-trader:latest
+docker push ghcr.io/danielsunyuan/nautilus-trader:$(date +%Y-%m-%d)
 ```
 
-For **Rust/Cython changes**, full rebuild is required:
+**When to rebuild the image:** Only if Rust/Cython core changes (rare). All strategy code, daemons, and adapters are Python — just `git pull` and restart containers.
+
 ```bash
-docker compose -f .docker/docker-compose.yml build papertrade-daemon-vpn
+# Full rebuild (only for Rust/Cython changes, ~20 min)
+docker compose -f .docker/docker-compose.yml build papertrade
 ```
 
 ### Startup Sequence
