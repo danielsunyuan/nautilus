@@ -68,8 +68,8 @@ services:
     restart: unless-stopped
 
   papertrade:
-    container_name: nautilus-papertrade
-    image: nautilus-papertrade:latest
+    container_name: nautilus-trader
+    image: nautilus-trader:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -106,8 +106,8 @@ services:
       - no-new-privileges:true
 
   papertrade-daemon:
-    container_name: nautilus-papertrade-daemon
-    image: nautilus-papertrade:latest
+    container_name: nautilus-crypto-5m-daemon
+    image: nautilus-trader:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -152,9 +152,9 @@ services:
       - no-new-privileges:true
 
   papertrade-vpn:
-    container_name: nautilus-papertrade-vpn
+    container_name: nautilus-trader-vpn
     profiles: ["vpn"]
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -192,9 +192,9 @@ services:
       - no-new-privileges:true
 
   papertrade-daemon-vpn:
-    container_name: nautilus-papertrade-daemon-vpn
+    container_name: nautilus-crypto-5m-daemon-vpn
     profiles: ["vpn"]
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -242,7 +242,7 @@ services:
   ninety-microprice-research-vpn:
     container_name: nautilus-ninety-microprice-research-vpn
     profiles: ["vpn"]
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -293,7 +293,7 @@ services:
 
   crypto-results-reporter:
     container_name: nautilus-crypto-results-reporter
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -323,7 +323,7 @@ services:
 
   sports-results-reporter:
     container_name: nautilus-sports-results-reporter
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     user: "${UID:-1000}:${GID:-1000}"
     working_dir: /opt/pysetup
     command:
@@ -353,7 +353,7 @@ services:
   weather-daemon-vpn:
     container_name: nautilus-weather-daemon-vpn
     profiles: ["vpn"]
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -399,7 +399,7 @@ services:
   sports-daemon-vpn:
     container_name: nautilus-sports-daemon-vpn
     profiles: ["vpn"]
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     user: "${UID:-1000}:${GID:-1000}"
     working_dir: /opt/pysetup
     command:
@@ -442,7 +442,7 @@ services:
   sports-focused-vpn:
     container_name: nautilus-sports-focused-vpn
     profiles: ["vpn"]
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     user: "${UID:-1000}:${GID:-1000}"
     working_dir: /opt/pysetup
     command:
@@ -485,7 +485,7 @@ services:
   sports-live-sim-vpn:
     container_name: nautilus-sports-live-sim-vpn
     profiles: ["vpn"]
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     user: "${UID:-1000}:${GID:-1000}"
     working_dir: /opt/pysetup
     command:
@@ -528,7 +528,7 @@ services:
   sports-settlement-vpn:
     container_name: nautilus-sports-settlement-vpn
     profiles: ["vpn"]
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     user: "${UID:-1000}:${GID:-1000}"
     working_dir: /opt/pysetup
     command:
@@ -559,7 +559,7 @@ services:
   weather-settlement-vpn:
     container_name: nautilus-weather-settlement-vpn
     profiles: ["vpn"]
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -593,7 +593,7 @@ services:
       - no-new-privileges:true
 
   sentinel-bridge:
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     profiles: ["sentinel"]
     restart: unless-stopped
     read_only: true
@@ -622,7 +622,7 @@ services:
       - "0"
 
   sentinel-news-daemon-vpn:
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     profiles: ["vpn", "sentinel"]
     restart: unless-stopped
     read_only: true
@@ -1066,7 +1066,7 @@ services:
   weather-ensemble-daemon-vpn:
     container_name: nautilus-weather-ensemble-daemon-vpn
     profiles: ["vpn"]
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -1112,7 +1112,7 @@ services:
   weather-ensemble-settlement-vpn:
     container_name: nautilus-weather-ensemble-settlement-vpn
     profiles: ["vpn"]
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile
@@ -1147,7 +1147,7 @@ services:
 
   weather-ensemble-results-reporter:
     container_name: nautilus-weather-ensemble-results-reporter
-    image: nautilus-papertrade:latest
+    image: nautilus-trader:latest
     build:
       context: ..
       dockerfile: .docker/nautilus_trader.dockerfile

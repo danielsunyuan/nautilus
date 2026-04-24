@@ -244,22 +244,22 @@ Both CLOB and Gamma are IP-blocked on the WSL2 host — all requests must run in
 ### Services (docker-compose.yml)
 
 Two images are used:
-- **`nautilus-papertrade:latest`** — full Rust/Cython build (~20 min); used for NautilusTrader TradingNode services.
+- **`nautilus-trader:latest`** — full Rust/Cython build (~20 min); used for NautilusTrader TradingNode services.
 - **`nautilus-recorder:latest`** — lightweight pip-installed `nautilus_trader`; used for recorders, signal watchers, exit server. Rebuilds in seconds.
 
 | Service | Container | Image | Purpose |
 |---------|-----------|-------|---------|
 | `nordvpn` | `nautilus-nordvpn` | `nautilus-nordvpn` | VPN sidecar; publishes port 8080 for exit server |
-| `papertrade-daemon-vpn` | `nautilus-papertrade-daemon-vpn` | `nautilus-papertrade:latest` | 5m BTC paper daemon via NordVPN |
-| `weather-daemon-vpn` | `nautilus-weather-daemon-vpn` | `nautilus-papertrade:latest` | Weather paper daemon via NordVPN |
+| `papertrade-daemon-vpn` | `nautilus-crypto-5m-daemon-vpn` | `nautilus-trader:latest` | 5m BTC paper daemon via NordVPN |
+| `weather-daemon-vpn` | `nautilus-weather-daemon-vpn` | `nautilus-trader:latest` | Weather paper daemon via NordVPN |
 | `weather-live-daemon-vpn` | `nautilus-weather-live-daemon-vpn` | `nautilus-recorder:latest` | Weather live daemon (90c, $50 budget) |
 | `weather-confirmed-entry-vpn` | `nautilus-weather-confirmed-vpn` | `nautilus-recorder:latest` | Confirmed-entry daemon (WU temp signal, $20/day budget) |
 | `weather-exit-server-vpn` | `nautilus-weather-exit-server` | `nautilus-recorder:latest` | Manual exit HTTP server (port 8080) |
-| `weather-settlement-vpn` | `nautilus-weather-settlement-vpn` | `nautilus-papertrade:latest` | Weather settlement poller (CLOB, 900s) |
-| `sports-daemon-vpn` | `nautilus-sports-daemon-vpn` | `nautilus-papertrade:latest` | Sports paper daemon via NordVPN |
-| `sports-settlement-vpn` | `nautilus-sports-settlement-vpn` | `nautilus-papertrade:latest` | Sports settlement poller (900s) |
-| `sports-results-reporter` | `nautilus-sports-results-reporter` | `nautilus-papertrade:latest` | Sports JSONL→SPORTS_RESULTS.md (60s) |
-| `crypto-results-reporter` | `nautilus-crypto-results-reporter` | `nautilus-papertrade:latest` | BTC JSONL→Markdown reports |
+| `weather-settlement-vpn` | `nautilus-weather-settlement-vpn` | `nautilus-trader:latest` | Weather settlement poller (CLOB, 900s) |
+| `sports-daemon-vpn` | `nautilus-sports-daemon-vpn` | `nautilus-trader:latest` | Sports paper daemon via NordVPN |
+| `sports-settlement-vpn` | `nautilus-sports-settlement-vpn` | `nautilus-trader:latest` | Sports settlement poller (900s) |
+| `sports-results-reporter` | `nautilus-sports-results-reporter` | `nautilus-trader:latest` | Sports JSONL→SPORTS_RESULTS.md (60s) |
+| `crypto-results-reporter` | `nautilus-crypto-results-reporter` | `nautilus-trader:latest` | BTC JSONL→Markdown reports |
 | `recorder-5m-vpn` | `nautilus-recorder-5m-vpn` | `nautilus-recorder:latest` | CLOB 5m order book recorder → Parquet |
 | `recorder-multi-tf-vpn` | `nautilus-recorder-multi-tf-vpn` | `nautilus-recorder:latest` | 15m/1h poll recorder → JSONL |
 | `signal-watcher-5m-vpn` | `nautilus-signal-watcher-5m-vpn` | `nautilus-recorder:latest` | Live 5m signal watcher → JSONL |
@@ -277,7 +277,7 @@ Two images are used:
 
 ### Rebuild Process
 
-The `nautilus-papertrade:latest` image compiles Nautilus from Rust/Cython source (~20 min full build). For **pure Python changes** (adapters, fee models, configs), patch the image in-place:
+The `nautilus-trader:latest` image compiles Nautilus from Rust/Cython source (~20 min full build). For **pure Python changes** (adapters, fee models, configs), patch the image in-place:
 
 ```bash
 # 1. Stop daemon
@@ -285,11 +285,11 @@ docker compose -f .docker/docker-compose.yml --profile vpn stop papertrade-daemo
 
 # 2. Patch pure Python files into existing image (seconds, not minutes)
 SITE="/usr/local/lib/python3.13/site-packages/nautilus_trader"
-docker create --name nautilus-patch nautilus-papertrade:latest sleep infinity
+docker create --name nautilus-patch nautilus-trader:latest sleep infinity
 docker cp nautilus_trader/adapters/polymarket/fee_model.py nautilus-patch:${SITE}/adapters/polymarket/fee_model.py
 # ... copy other changed .py files ...
-docker tag nautilus-papertrade:latest nautilus-papertrade:pre-patch
-docker commit nautilus-patch nautilus-papertrade:latest
+docker tag nautilus-trader:latest nautilus-trader:pre-patch
+docker commit nautilus-patch nautilus-trader:latest
 docker rm nautilus-patch
 
 # 3. Restart
@@ -369,7 +369,7 @@ docker compose -f .docker/docker-compose.yml exec workspace uv run --extra polym
 docker compose -f .docker/docker-compose.yml --profile vpn up -d papertrade-daemon-vpn
 
 # Follow daemon logs
-docker logs -f nautilus-papertrade-daemon-vpn
+docker logs -f nautilus-crypto-5m-daemon-vpn
 
 # Paper trader (one-shot, no VPN)
 docker compose -f .docker/docker-compose.yml run --rm papertrade
