@@ -35,6 +35,14 @@ def _group_markets_by_game(markets) -> dict[str, list[str]]:
     return dict(groups)
 
 
+def _group_markets_by_condition(markets) -> dict[str, list[str]]:
+    from collections import defaultdict
+    groups: dict[str, list[str]] = defaultdict(list)
+    for market in markets:
+        groups[market.condition_id].append(_build_instrument_id(market))
+    return dict(groups)
+
+
 # --- Tests ---
 
 def _make_market(slug="m1", cond="0xABC", token="tok1", title="A vs B", game_time="2026-04-20T18:00:00"):
@@ -71,3 +79,14 @@ def test_single_market_gets_empty_sibling_list():
     inst_id = _build_instrument_id(m)
     siblings = [iid for iid in groups[_game_key(m)] if iid != inst_id]
     assert siblings == []
+
+
+def test_condition_grouping_keeps_distinct_ufc_markets_separate():
+    """Different condition_ids in the same fight should remain separate risk families."""
+    moneyline = _make_market(cond="0xAAA", token="t1", title="A vs B", game_time="2026-04-20T18:00:00")
+    prop = _make_market(cond="0xBBB", token="t2", title="A vs B", game_time="2026-04-20T18:00:00")
+
+    groups = _group_markets_by_condition([moneyline, prop])
+
+    assert groups["0xAAA"] == [_build_instrument_id(moneyline)]
+    assert groups["0xBBB"] == [_build_instrument_id(prop)]

@@ -367,3 +367,18 @@ def test_kelly_sizing_end_to_end():
 def test_kelly_sizing_zero_edge_returns_zero():
     """kelly_stake_usd returns 0 for zero edge — _compute_order_quantity should refuse order."""
     assert lib.kelly_stake_usd(edge=0.0, entry_price=0.65, bankroll_usd=1000.0) == 0.0
+
+
+def test_ufc_favorite_fixed_presets_shape():
+    presets = lib.ufc_favorite_fixed_presets()
+    assert len(presets) == 1
+
+    preset = presets[0]
+    assert preset.name == "ufc_favorite_fixed_shares"
+    assert preset.arena == "ufc_favorite_fixed"
+    assert preset.mode == "band_only"
+    assert preset.order_qty == 10.0
+    assert preset.allowed_sports == frozenset({"ufc"})
+    assert preset.allowed_market_types is None
+    assert preset.min_ask == 0.50
+    assert preset.max_ask == 0.981

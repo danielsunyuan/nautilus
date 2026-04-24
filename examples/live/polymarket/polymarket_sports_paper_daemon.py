@@ -32,6 +32,7 @@ from pathlib import Path
 import httpx
 import random
 import re
+import signal
 import sys
 import uuid
 from typing import Any
@@ -54,6 +55,19 @@ except ModuleNotFoundError:
     discover_sports_markets = module.discover_sports_markets
 
 try:
+    from examples.live.polymarket.sports_models import select_highest_price_outcome_per_condition
+except ModuleNotFoundError:
+    module_name = "examples.live.polymarket.sports_models"
+    module_path = Path(__file__).resolve().with_name("sports_models.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    select_highest_price_outcome_per_condition = module.select_highest_price_outcome_per_condition
+
+try:
     from examples.live.polymarket.sports_strategy_library import (
         SportsStrategyPreset,
         all_sports_presets,
@@ -61,6 +75,7 @@ try:
         depth_focused_presets,
         focused_presets,
         should_enter_sports_market,
+        ufc_favorite_fixed_presets,
     )
 except ModuleNotFoundError:
     module_name = "examples.live.polymarket.sports_strategy_library"
@@ -77,6 +92,7 @@ except ModuleNotFoundError:
     depth_focused_presets = module.depth_focused_presets
     focused_presets = module.focused_presets
     should_enter_sports_market = module.should_enter_sports_market
+    ufc_favorite_fixed_presets = module.ufc_favorite_fixed_presets
 
 try:
     from examples.live.polymarket.sports_live_strategy import (
@@ -133,10 +149,54 @@ DEFAULT_RECONNECT_DELAY = 2.0
 DEFAULT_CACHE_HOST = "redis"
 DEFAULT_CACHE_PORT = 6379
 _SAFE_PRESET_SET = re.compile(r"^[A-Za-z0-9_-]+$")
+_NODE_BUILD_TIMEOUT_SECS = 180
 
 
 class RecoverableDaemonError(RuntimeError):
     """Raised for recoverable session or round runtime failures."""
+
+
+def _run_with_timeout(fn: Any, timeout_secs: int = _NODE_BUILD_TIMEOUT_SECS) -> Any:
+    """Run a callable with a hard timeout using a lightweight shell watchdog.
+
+    TradingNode.__init__() blocks indefinitely inside Cython (Redis MessageBus
+    setup) while holding the Python GIL.  Thread-based watchdogs cannot fire
+    while the GIL is held.
+
+    Solution: spawn a /bin/sh subprocess that sleeps then sends SIGKILL.
+    sh + sleep are tiny binaries that survive memory pressure (no Python
+    interpreter overhead, safe from OOM-killer).  The watchdog is independent
+    of the parent's GIL and memory state.
+    """
+    import subprocess
+
+    _pid = os.getpid()
+
+    # Watchdog: sh built-in kill (no external kill binary needed), sleep from /usr/bin/sleep
+    watchdog_proc = subprocess.Popen(
+        ["/bin/sh", "-c", f"sleep {timeout_secs}; kill -9 {_pid}"],
+        close_fds=True,
+    )
+
+    def _cancel_watchdog() -> None:
+        try:
+            watchdog_proc.terminate()
+            watchdog_proc.wait(timeout=2)
+        except Exception:
+            pass
+
+    try:
+        result = fn()
+        _cancel_watchdog()
+        return result
+    except Exception:
+        _cancel_watchdog()
+        raise
+
+
+def _node_build_with_sigalrm(node: Any) -> None:
+    """Build a TradingNode with a hard timeout (kept for backward compat)."""
+    _run_with_timeout(node.build)
 
 
 class JsonlRunWriter:
@@ -146,8 +206,7 @@ class JsonlRunWriter:
 
     def write(self, payload: dict[str, Any]) -> None:
         with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True))
-            handle.write("\n")
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
             handle.flush()
 
 
@@ -205,6 +264,8 @@ def _strategy_presets_for_set(
         return depth_focused_presets()
     if normalized == "clv-focused":
         return clv_focused_presets()
+    if normalized in {"ufc-favorite-fixed", "ufc_favorite_fixed"}:
+        return ufc_favorite_fixed_presets()
     if normalized == "live-sim":
         return focused_presets()
     if normalized == "smoke":
@@ -238,6 +299,10 @@ def build_daemon_node_config(
     cache_host: str,
     cache_port: int,
 ) -> TradingNodeConfig:
+    # Note: cache_host/cache_port are accepted for API compatibility but not used.
+    # The VPN routing table (NordVPN policy rules) routes Docker-internal IPs through
+    # the VPN tunnel, making Redis unreachable from inside VPN-connected containers.
+    # In-memory cache/message-bus is sufficient: the daemon is stateless across rounds.
     instrument_provider_config = PolymarketInstrumentProviderConfig(load_ids=frozenset(instrument_ids))
     return TradingNodeConfig(
         trader_id=TraderId(trader_id),
@@ -251,7 +316,7 @@ def build_daemon_node_config(
             snapshot_positions_interval_secs=5.0,
         ),
         cache=CacheConfig(
-            database=DatabaseConfig(host=cache_host, port=cache_port),
+            database=None,  # in-memory only — Redis unreachable via VPN routing
             timestamps_as_iso8601=True,
             persist_account_events=True,
             buffer_interval_ms=100,
@@ -259,7 +324,7 @@ def build_daemon_node_config(
             use_instance_id=True,
         ),
         message_bus=MessageBusConfig(
-            database=DatabaseConfig(host=cache_host, port=cache_port),
+            database=None,  # in-memory only — Redis unreachable via VPN routing
             timestamps_as_iso8601=True,
             buffer_interval_ms=100,
             streams_prefix="polymarket-sports",
@@ -320,6 +385,69 @@ def _group_markets_by_game(markets: list[SportsMarket]) -> dict[str, list[str]]:
     for market in markets:
         groups[_game_key(market)].append(_build_instrument_id(market))
     return dict(groups)
+
+
+def _group_markets_by_condition(markets: list[SportsMarket]) -> dict[str, list[str]]:
+    """Group market instrument IDs by condition_id."""
+    groups: dict[str, list[str]] = defaultdict(list)
+    for market in markets:
+        groups[market.condition_id].append(_build_instrument_id(market))
+    return dict(groups)
+
+
+def _risk_groups_for_preset_set(
+    *,
+    preset_set: str,
+    markets: list[SportsMarket],
+) -> dict[str, list[str]]:
+    normalized = str(preset_set).strip().lower()
+    if normalized in {"ufc-favorite-fixed", "ufc_favorite_fixed"}:
+        return _group_markets_by_condition(markets)
+    return _group_markets_by_game(markets)
+
+
+def _risk_group_key_for_market(
+    *,
+    preset_set: str,
+    market: SportsMarket,
+) -> str:
+    normalized = str(preset_set).strip().lower()
+    if normalized in {"ufc-favorite-fixed", "ufc_favorite_fixed"}:
+        return market.condition_id
+    return _game_key(market)
+
+
+def _prepare_tradeable_markets(
+    *,
+    preset_set: str,
+    markets: list[SportsMarket],
+    now_iso: str,
+) -> list[SportsMarket]:
+    tradeable_markets = [
+        m for m in markets
+        if m.accepting_orders and (not m.game_time or m.game_time > now_iso)
+    ]
+
+    normalized = str(preset_set).strip().lower()
+    if normalized in {"ufc-favorite-fixed", "ufc_favorite_fixed"}:
+        ufc_markets = [market for market in tradeable_markets if market.sport == "ufc"]
+        return select_highest_price_outcome_per_condition(ufc_markets)
+
+    # Stratified sample: up to 25 per sport per round to maximise cross-sport coverage.
+    # Within each sport, prefer nearest game_time (most actionable).
+    # This prevents a single sport (e.g. UFC with 600 markets) from crowding out others.
+    per_sport_cap = 25
+    round_cap = 150  # total instruments per round (150 × 10 presets = 1500 strategies)
+    by_sport: dict[str, list[SportsMarket]] = defaultdict(list)
+    for market in tradeable_markets:
+        by_sport[market.sport].append(market)
+
+    sampled_markets: list[SportsMarket] = []
+    for sport_markets in by_sport.values():
+        sport_markets.sort(key=lambda market: market.game_time or "")
+        sampled_markets.extend(sport_markets[:per_sport_cap])
+    sampled_markets.sort(key=lambda market: market.game_time or "")
+    return sampled_markets[:round_cap]
 
 
 async def run_daemon(
@@ -389,27 +517,12 @@ async def run_daemon(
                 },
             )
 
-        # --- filter to accepting_orders=True markets with future game_time ---
-        now = datetime.now(UTC).isoformat()
-        tradeable_markets = [
-            m for m in markets
-            if m.accepting_orders and (not m.game_time or m.game_time > now)
-        ]
-        # Stratified sample: up to 25 per sport per round to maximise cross-sport coverage.
-        # Within each sport, prefer nearest game_time (most actionable).
-        # This prevents a single sport (e.g. UFC with 600 markets) from crowding out others.
-        _PER_SPORT_CAP = 25
-        _ROUND_CAP = 150  # total instruments per round (150 × 10 presets = 1500 strategies)
-        from collections import defaultdict as _dd
-        _by_sport: dict = _dd(list)
-        for _m in tradeable_markets:
-            _by_sport[_m.sport].append(_m)
-        tradeable_markets = []
-        for _sport_markets in _by_sport.values():
-            _sport_markets.sort(key=lambda m: m.game_time or "")
-            tradeable_markets.extend(_sport_markets[:_PER_SPORT_CAP])
-        tradeable_markets.sort(key=lambda m: m.game_time or "")
-        tradeable_markets = tradeable_markets[:_ROUND_CAP]
+        # --- filter to tradeable markets for the selected preset set ---
+        tradeable_markets = _prepare_tradeable_markets(
+            preset_set=preset_set,
+            markets=markets,
+            now_iso=datetime.now(UTC).isoformat(),
+        )
 
         writer.write(
             {
@@ -503,23 +616,47 @@ def extract_sports_strategy_results(
     presets: tuple[Any, ...],
     strategy_ids_by_key: dict[str, StrategyId],
 ) -> list[dict[str, Any]]:
-    """Extract open positions from the cache for each (market, preset) pair."""
+    """Extract open positions from the cache for each (market, preset) pair.
+
+    NOTE: Nautilus auto-assigns numeric order_id_tags (e.g. SPORTS-760) to strategies
+    at registration time. These don't match the config strategy_id string, so filtering
+    by strategy_id is unreliable. Instead we query by instrument_id only (one open
+    position per instrument max, since price bands don't overlap) and infer which
+    preset entered by matching the entry price against the preset's band + sport filter.
+    """
+    # Build instrument_id → position map from all open positions in cache.
+    positions_by_instrument: dict[str, Any] = {}
+    try:
+        for pos in cache.positions_open():
+            iid = str(getattr(pos, "instrument_id", ""))
+            if iid:
+                positions_by_instrument[iid] = pos
+    except Exception:
+        pass
+
     rows: list[dict[str, Any]] = []
     for market in markets:
         instrument_id_str = _build_instrument_id(market)
         cache_instrument_id = InstrumentId.from_str(instrument_id_str)
+        pos = positions_by_instrument.get(instrument_id_str)
+
         for preset in presets:
             strategy_key = f"{market.slug}:{preset.name}"
-            strategy_id = strategy_ids_by_key.get(strategy_key)
-            if strategy_id is None:
+            if strategy_ids_by_key.get(strategy_key) is None:
                 continue
 
-            open_positions = list(
-                cache.positions_open(
-                    instrument_id=cache_instrument_id,
-                    strategy_id=strategy_id,
-                ),
-            )
+            open_positions = [pos] if pos is not None else []
+
+            # Extra guard: verify the entry price falls within the preset's band.
+            # This avoids crediting a preset that didn't actually fire.
+            if open_positions:
+                entry_px = float(_as_decimal(getattr(pos, "avg_px_open", 0)))
+                if not (preset.min_ask <= entry_px < preset.max_ask):
+                    open_positions = []
+                elif preset.allowed_sports is not None and market.sport not in preset.allowed_sports:
+                    open_positions = []
+                elif preset.allowed_market_types is not None and market.market_type not in preset.allowed_market_types:
+                    open_positions = []
             if open_positions:
                 pos = open_positions[-1]
                 shares = float(_as_decimal(getattr(pos, "peak_qty", None) or pos.quantity))
@@ -608,7 +745,10 @@ async def _default_run_round(
                 )
 
     # Group markets by game for family position cap
-    game_groups = _group_markets_by_game(markets)
+    risk_groups = _risk_groups_for_preset_set(
+        preset_set=preset_set,
+        markets=markets,
+    )
 
     instrument_ids: list[str] = []
     for market in markets:
@@ -620,42 +760,52 @@ async def _default_run_round(
         cache_host=os.getenv("NAUTILUS_CACHE_HOST", DEFAULT_CACHE_HOST),
         cache_port=int(os.getenv("NAUTILUS_CACHE_PORT", str(DEFAULT_CACHE_PORT))),
     )
-    node = TradingNode(config=config)
+    # Wrap TradingNode creation AND build in a single watchdog — the hang
+    # occurs inside TradingNode.__init__ (kernel/Redis setup), before
+    # node.build() is called, so the watchdog must start first.
     strategy_ids_by_key: dict[str, StrategyId] = {}
 
-    for market in markets:
-        inst_id_str = _build_instrument_id(market)
-        family_inst_ids = tuple(
-            iid
-            for iid in game_groups.get(_game_key(market), [])
-            if iid != inst_id_str
-        )
-        for preset in presets:
-            strategy_key = f"{market.slug}:{preset.name}"
-            strategy = SportsPaperStrategy(
-                config=SportsPaperStrategyConfig(
-                    strategy_id=f"SPORTS-{preset.name.upper()}",
-                    instrument_id=InstrumentId.from_str(inst_id_str),
-                    preset=preset,
-                    order_qty=Decimal(str(preset.order_qty)),
-                    sport=market.sport,
-                    market_type=market.market_type,
-                    game_time=market.game_time,
-                    vegas_implied=vegas_cache.get(f"{market.slug}:{market.outcome_name}"),
-                    family_instrument_ids=family_inst_ids,
-                    target_usd_per_market=budget.get("target_usd_per_market"),
-                    min_order_size_shares=budget.get("min_order_size_shares", Decimal("0")),
-                    max_stake_per_market=budget.get("max_stake_per_market"),
-                    max_open_positions=budget.get("max_open_positions"),
-                    max_total_open_stake=budget.get("max_total_open_stake"),
-                ),
+    def _create_and_build() -> TradingNode:
+        n = TradingNode(config=config)
+        for market in markets:
+            inst_id_str = _build_instrument_id(market)
+            risk_group_key = _risk_group_key_for_market(
+                preset_set=preset_set,
+                market=market,
             )
-            node.trader.add_strategy(strategy)
-            strategy_ids_by_key[strategy_key] = strategy.id
+            family_inst_ids = tuple(
+                iid
+                for iid in risk_groups.get(risk_group_key, [])
+                if iid != inst_id_str
+            )
+            for preset in presets:
+                strategy_key = f"{market.slug}:{preset.name}"
+                strategy = SportsPaperStrategy(
+                    config=SportsPaperStrategyConfig(
+                        strategy_id=f"SPORTS-{preset.name.upper()}",
+                        instrument_id=InstrumentId.from_str(inst_id_str),
+                        preset=preset,
+                        order_qty=Decimal(str(preset.order_qty)),
+                        sport=market.sport,
+                        market_type=market.market_type,
+                        game_time=market.game_time,
+                        vegas_implied=vegas_cache.get(f"{market.slug}:{market.outcome_name}"),
+                        family_instrument_ids=family_inst_ids,
+                        target_usd_per_market=budget.get("target_usd_per_market"),
+                        min_order_size_shares=budget.get("min_order_size_shares", Decimal("0")),
+                        max_stake_per_market=budget.get("max_stake_per_market"),
+                        max_open_positions=budget.get("max_open_positions"),
+                        max_total_open_stake=budget.get("max_total_open_stake"),
+                    ),
+                )
+                n.trader.add_strategy(strategy)
+                strategy_ids_by_key[strategy_key] = strategy.id
+        n.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
+        n.add_exec_client_factory(POLYMARKET, SandboxLiveExecClientFactory)
+        n.build()
+        return n
 
-    node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
-    node.add_exec_client_factory(POLYMARKET, SandboxLiveExecClientFactory)
-    node.build()
+    node = _run_with_timeout(_create_and_build)
 
     try:
         run_task = asyncio.create_task(node.run_async())

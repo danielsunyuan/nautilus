@@ -124,8 +124,7 @@ class JsonlRunWriter:
 
     def write(self, payload: dict[str, Any]) -> None:
         with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True))
-            handle.write("\n")
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
             handle.flush()
 
 

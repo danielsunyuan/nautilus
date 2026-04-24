@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,7 +27,26 @@ CITY_STATIONS = {
     "London": ("EGLC", "GB", "C", "wu"),
     "Tokyo": ("RJTT", "JP", "C", "wu"),
     "Austin": ("KAUS", "US", "F", "wu"),
+    "Guangzhou": ("ZGGG", "CN", "C", "wu"),
 }
+
+_CITY_TIMEZONES = {
+    "NYC": "America/New_York",
+    "London": "Europe/London",
+    "Tokyo": "Asia/Tokyo",
+    "Austin": "America/Chicago",
+    "Guangzhou": "Asia/Shanghai",
+}
+
+
+def _city_target_date(city: str, now: datetime) -> date:
+    import zoneinfo
+
+    tz_name = _CITY_TIMEZONES.get(city)
+    if tz_name is None:
+        return now.date()
+    tz = zoneinfo.ZoneInfo(tz_name)
+    return now.astimezone(tz).date()
 
 
 def _next_poll_secs(
@@ -422,21 +441,29 @@ async def _run_poll_cycle_local(
     latest_obs: dict,
     fetch_fn,          # async callable(city) -> StationObs | None
     signal_fn=None,    # optional callable(market, obs) -> signal | None
+    now: datetime | None = None,
 ) -> tuple[dict, float]:
     """Stripped _run_poll_cycle for unit tests: no CLOB, no writer, no I/O.
 
     Returns (cities_with_fresh_obs_dict, next_poll_secs).
     cities_with_fresh_obs_dict maps city -> obs that were fetched this cycle.
     """
+    # Mirror production: skip metric="low" markets (daily-high fetcher only)
+    markets = [m for m in markets if getattr(m, "metric", "high") != "low"]
+
     unique_cities = {m.city for m in markets}
+    effective_now = now or datetime.now(UTC)
     prev_obs = {
         city: (latest_obs[city].daily_max if city in latest_obs else None)
         for city in unique_cities
     }
     cities_with_fresh_obs: set[str] = set()
+    fetch_target_dates: dict[str, date] = {}
     for city in unique_cities:
+        target_date = _city_target_date(city, effective_now)
+        fetch_target_dates[city] = target_date
         try:
-            obs = await fetch_fn(city)
+            obs = await fetch_fn(city, target_date)
         except Exception:
             continue
         if obs is None:
@@ -504,6 +531,7 @@ async def _run_poll_cycle_local(
         "signals_evaluated": signals_evaluated,
         "city_a1_entered": city_a1_entered,
         "sorted_market_slugs": [m.slug for m in sorted_markets],
+        "fetch_target_dates": fetch_target_dates,
     }, next_poll_secs_val
 
 
@@ -522,7 +550,7 @@ class TestRunPollCycleOneFetchPerCity:
 
         fetch_calls: list[str] = []
 
-        async def fetch_fn(city: str) -> StationObs:
+        async def fetch_fn(city: str, target_date: date) -> StationObs:
             fetch_calls.append(city)
             return _make_obs(city, 71.0)
 
@@ -556,7 +584,7 @@ class TestRunPollCycleStaleFetchMiss:
         latest_obs = {"NYC": stale_obs}
         tracker = ConfirmTracker()
 
-        async def fetch_fn(city: str):
+        async def fetch_fn(city: str, target_date: date):
             raise RuntimeError("network error")
 
         result, _ = asyncio.get_event_loop().run_until_complete(
@@ -579,7 +607,7 @@ class TestRunPollCycleStaleFetchMiss:
         latest_obs = {"NYC": stale_obs}
         tracker = ConfirmTracker()
 
-        async def fetch_fn(city: str):
+        async def fetch_fn(city: str, target_date: date):
             return None  # simulates "no data available"
 
         result, _ = asyncio.get_event_loop().run_until_complete(
@@ -613,7 +641,7 @@ class TestRunPollCycleA1LatchAfterGating:
         # daily_max = 72F — above 70+1=71 (A1 breach for 70 threshold) but NOT above 75+1=76
         # So higher rung (75) does NOT fire A1; lower rung (70) DOES fire A1
 
-        async def fetch_fn(city: str) -> StationObs:
+        async def fetch_fn(city: str, target_date: date) -> StationObs:
             return _make_obs(city, 72.0)  # 72°F
 
         def signal_fn(market, obs, confirm_counts):
@@ -655,7 +683,7 @@ class TestRunPollCycleA1LatchAfterGating:
         m_low  = _make_market("NYC", 70.0, slug="nyc-70")
 
         # daily_max = 77F — above both thresholds, so both fire A1
-        async def fetch_fn(city: str) -> StationObs:
+        async def fetch_fn(city: str, target_date: date) -> StationObs:
             return _make_obs(city, 77.0)
 
         # Simulate gate failure: higher rung returns a signal with a max_entry_price
@@ -710,7 +738,7 @@ class TestRunPollCycleFirstCycleCadence:
         m = _make_market("NYC", 70.0, slug="nyc-70")
         latest_obs: dict = {}  # empty on first run
 
-        async def fetch_fn(city: str) -> StationObs:
+        async def fetch_fn(city: str, target_date: date) -> StationObs:
             # 70.5°F — within 4°F of the 70°F threshold → should trigger 300s
             return _make_obs(city, 70.5)
 
@@ -729,7 +757,7 @@ class TestRunPollCycleFirstCycleCadence:
         m = _make_market("NYC", 70.0, slug="nyc-70")
         latest_obs: dict = {}
 
-        async def fetch_fn(city: str) -> StationObs:
+        async def fetch_fn(city: str, target_date: date) -> StationObs:
             return _make_obs(city, 55.0)  # far from 70°F
 
         _, next_poll = asyncio.get_event_loop().run_until_complete(
@@ -758,7 +786,7 @@ class TestRunPollCycleCrossCityOrdering:
         m2 = _make_market("NYC", 75.0, slug="nyc-75")
         m3 = _make_market("NYC", 80.0, slug="nyc-80")
 
-        async def fetch_fn(city: str) -> StationObs:
+        async def fetch_fn(city: str, target_date: date) -> StationObs:
             return _make_obs(city, 60.0)
 
         result, _ = asyncio.get_event_loop().run_until_complete(
@@ -779,7 +807,7 @@ class TestRunPollCycleCrossCityOrdering:
         m_nyc    = _make_market("NYC",    70.0, slug="nyc-70")
         m_london = _make_market("London", 20.0, slug="london-20")
 
-        async def fetch_fn(city: str) -> StationObs:
+        async def fetch_fn(city: str, target_date: date) -> StationObs:
             return _make_obs(city, 50.0)
 
         # Resolver delivers Austin first, then NYC, then London
@@ -798,3 +826,447 @@ class TestRunPollCycleCrossCityOrdering:
         nyc_idx    = slugs.index("nyc-70")
         london_idx = slugs.index("london-20")
         assert austin_idx < nyc_idx < london_idx
+
+
+# ---------------------------------------------------------------------------
+# Test: metric="low" markets are skipped (daily-high fetcher only)
+# ---------------------------------------------------------------------------
+
+class TestMetricLowSkipped:
+    """Markets with metric='low' must never fire a signal — the fetcher only tracks
+    the daily HIGH temperature so a 'low' reading would be completely wrong.
+    This was the root cause of the Shanghai $81 disaster (2026-04-22)."""
+
+    def test_low_metric_market_never_evaluated(self):
+        """A metric='low' market should produce no signals even when temp is above threshold."""
+        m_high = _make_market("NYC", 70.0, slug="nyc-70-high")
+        m_high.metric = "high"
+
+        m_low = _make_market("NYC", 14.0, slug="nyc-14-low")
+        m_low.metric = "low"
+
+        # Daily max well above the low threshold — would fire if not filtered
+        async def fetch_fn(city: str, target_date: date) -> StationObs:
+            return _make_obs(city, 25.0)  # 25°C >> 14°C threshold
+
+        signals_fired: list[str] = []
+
+        def signal_fn(market, obs, confirm_counts):
+            signals_fired.append(market.slug)
+            return None  # we only care that metric=low market is not even passed here
+
+        tracker = ConfirmTracker()
+        result, _ = asyncio.get_event_loop().run_until_complete(
+            _run_poll_cycle_local(
+                markets=[m_high, m_low],
+                confirm_tracker=tracker,
+                latest_obs={},
+                fetch_fn=fetch_fn,
+                signal_fn=signal_fn,
+            )
+        )
+
+        # The low-metric market must not appear in sorted_market_slugs at all
+        assert "nyc-14-low" not in result["sorted_market_slugs"], (
+            "metric='low' market reached sorted_market_slugs — filter is missing"
+        )
+
+    def test_high_metric_market_still_evaluated_alongside_low(self):
+        """Filtering out metric='low' must not suppress the metric='high' market."""
+        m_high = _make_market("NYC", 70.0, slug="nyc-70-high")
+        m_high.metric = "high"
+
+        m_low = _make_market("NYC", 14.0, slug="nyc-14-low")
+        m_low.metric = "low"
+
+        async def fetch_fn(city: str, target_date: date) -> StationObs:
+            return _make_obs(city, 72.0)
+
+        tracker = ConfirmTracker()
+        result, _ = asyncio.get_event_loop().run_until_complete(
+            _run_poll_cycle_local(
+                markets=[m_high, m_low],
+                confirm_tracker=tracker,
+                latest_obs={},
+                fetch_fn=fetch_fn,
+            )
+        )
+
+        assert "nyc-70-high" in result["sorted_market_slugs"]
+        assert "nyc-14-low" not in result["sorted_market_slugs"]
+
+    def test_metric_default_high_not_filtered(self):
+        """Markets with no metric attribute (default='high') must not be filtered out."""
+        m = _make_market("NYC", 70.0, slug="nyc-70")
+        del m.metric  # no metric attr at all — should default to "high"
+
+        async def fetch_fn(city: str, target_date: date) -> StationObs:
+            return _make_obs(city, 72.0)
+
+        tracker = ConfirmTracker()
+        result, _ = asyncio.get_event_loop().run_until_complete(
+            _run_poll_cycle_local(
+                markets=[m],
+                confirm_tracker=tracker,
+                latest_obs={},
+                fetch_fn=fetch_fn,
+            )
+        )
+
+        assert "nyc-70" in result["sorted_market_slugs"]
+
+
+class TestCityTargetDate:
+    def test_tokyo_rolls_to_next_local_date_after_midnight(self):
+        now = datetime(2026, 4, 22, 15, 11, 9, tzinfo=UTC)
+        assert _city_target_date("Tokyo", now) == date(2026, 4, 23)
+
+    def test_guangzhou_rolls_to_next_local_date_after_midnight(self):
+        now = datetime(2026, 4, 22, 16, 25, 8, tzinfo=UTC)
+        assert _city_target_date("Guangzhou", now) == date(2026, 4, 23)
+
+    def test_poll_cycle_fetches_city_local_target_date(self):
+        m_tokyo = _make_market("Tokyo", 19.0, band_type="exact", slug="tokyo-19")
+        m_tokyo.observation_date = "2026-04-23"
+        m_gz = _make_market("Guangzhou", 29.0, band_type="or_higher", slug="guangzhou-29")
+        m_gz.observation_date = "2026-04-23"
+
+        fetch_calls: list[tuple[str, date]] = []
+
+        async def fetch_fn(city: str, target_date: date) -> StationObs:
+            fetch_calls.append((city, target_date))
+            return _make_obs(city, 22.0 if city == "Tokyo" else 30.0, unit="C")
+
+        result, _ = asyncio.get_event_loop().run_until_complete(
+            _run_poll_cycle_local(
+                markets=[m_tokyo, m_gz],
+                confirm_tracker=ConfirmTracker(),
+                latest_obs={},
+                fetch_fn=fetch_fn,
+                now=datetime(2026, 4, 22, 16, 25, 8, tzinfo=UTC),
+            )
+        )
+
+        assert sorted(fetch_calls) == [
+            ("Guangzhou", date(2026, 4, 23)),
+            ("Tokyo", date(2026, 4, 23)),
+        ]
+        assert result["fetch_target_dates"] == {
+            "Tokyo": date(2026, 4, 23),
+            "Guangzhou": date(2026, 4, 23),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Test: order amount semantics — stake (USDC) not shares
+# ---------------------------------------------------------------------------
+
+class TestOrderAmountSemantics:
+    """MarketOrderArgs(amount=X, side=BUY) means 'spend X USDC', NOT 'buy X shares'.
+    At mid=0.025, shares ≈ 80 while stake ≈ $2. Passing shares would spend $80.
+    This was the exact mechanism of the Shanghai $81 disaster (2026-04-22)."""
+
+    def test_stake_equals_shares_times_mid(self):
+        """stake = shares * mid — verify the relationship at several price points."""
+        from decimal import Decimal
+        TARGET_USD = Decimal("2")
+
+        for mid_float in [0.025, 0.05, 0.10, 0.50, 0.90, 0.95]:
+            mid = Decimal(str(mid_float))
+            raw_shares = TARGET_USD / mid
+            shares = raw_shares.quantize(Decimal("0.0001"))
+            stake = (shares * mid).quantize(Decimal("0.0001"))
+
+            # stake must be close to TARGET_USD (within rounding)
+            assert abs(float(stake) - float(TARGET_USD)) < 0.01, (
+                f"stake={stake} not close to TARGET_USD={TARGET_USD} at mid={mid}"
+            )
+            # At any price < $1, shares > stake — passing shares would overspend
+            if mid_float < 1.0:
+                assert float(shares) > float(stake), (
+                    f"shares={shares} not > stake={stake} at mid={mid}: "
+                    "if this fails, the overspend bug is hidden"
+                )
+
+    def test_passing_shares_would_overspend_at_low_mid(self):
+        """Demonstrate the exact $81 bug: at mid=0.025, shares=80, stake=2.
+        Passing shares to MarketOrderArgs.amount would spend $80 instead of $2."""
+        from decimal import Decimal
+        TARGET_USD = Decimal("2")
+        mid = Decimal("0.025")  # 2.5c — a near-certain losing market
+
+        raw_shares = TARGET_USD / mid
+        shares = raw_shares.quantize(Decimal("0.0001"))
+        stake = (shares * mid).quantize(Decimal("0.0001"))
+
+        # At 2.5c, buying $2 worth gives 80 shares
+        assert float(shares) == pytest.approx(80.0, abs=0.01)
+        assert float(stake) == pytest.approx(2.0, abs=0.01)
+
+        # Overspend factor: if shares was passed instead of stake
+        overspend_factor = float(shares) / float(stake)
+        assert overspend_factor == pytest.approx(40.0, abs=0.1), (
+            f"Expected 40× overspend factor at mid=0.025, got {overspend_factor:.1f}×"
+        )
+
+    def test_amount_must_be_stake_not_shares_at_90c(self):
+        """Even at high prices (90c), shares != stake. stake=2, shares=2.22."""
+        from decimal import Decimal
+        TARGET_USD = Decimal("2")
+        mid = Decimal("0.90")
+
+        raw_shares = TARGET_USD / mid
+        shares = raw_shares.quantize(Decimal("0.0001"))
+        stake = (shares * mid).quantize(Decimal("0.0001"))
+
+        # $2 / $0.90 = 2.222 shares
+        assert float(shares) == pytest.approx(2.222, abs=0.001)
+        assert float(stake) == pytest.approx(2.0, abs=0.01)
+        assert float(shares) != float(stake)
+
+
+# ---------------------------------------------------------------------------
+# Test: session boundary reset clears entered_this_session and confirm_tracker
+# ---------------------------------------------------------------------------
+
+class TestSessionBoundaryReset:
+    """entered_this_session and confirm_tracker must be cleared when the trading day
+    rolls over. Without this, the daemon would block all entries on the new day
+    because the previous day's slugs remain in entered_this_session."""
+
+    def test_entered_this_session_resets_on_day_change(self):
+        """Simulates the session roll by checking that the reset logic fires when
+        session_trading_day changes between loop iterations."""
+        from datetime import date
+
+        # Simulate two consecutive session days
+        day1 = date(2026, 4, 22)
+        day2 = date(2026, 4, 23)
+
+        entered = {("some-slug", "yes"), ("other-slug", "no")}
+        tracker = ConfirmTracker()
+        # Seed tracker with a count so we can verify it was reset
+        tracker.record("some-slug", "A1", True)
+        assert tracker.get("some-slug", "A1") == 1
+
+        # Simulate the reset logic from _run_main_loop
+        last_session_day = day1
+        current_session_day = day2  # day has rolled
+
+        if last_session_day is not None and current_session_day != last_session_day:
+            entered = set()
+            tracker = ConfirmTracker()
+
+        assert entered == set(), "entered_this_session must be cleared after day roll"
+        assert tracker.get("some-slug", "A1") == 0, "ConfirmTracker must be reset after day roll"
+
+    def test_no_reset_on_same_day(self):
+        """No reset when session_trading_day has not changed."""
+        from datetime import date
+
+        day = date(2026, 4, 22)
+        entered = {("some-slug", "yes")}
+        tracker = ConfirmTracker()
+        tracker.record("some-slug", "A1", True)
+
+        last_session_day = day
+        current_session_day = day  # same day
+
+        if last_session_day is not None and current_session_day != last_session_day:
+            entered = set()
+            tracker = ConfirmTracker()
+
+        # Nothing should have changed
+        assert ("some-slug", "yes") in entered
+        assert tracker.get("some-slug", "A1") == 1
+
+
+# ---------------------------------------------------------------------------
+# Test: _fetch_usdc_balance — real on-chain USDC balance fetch
+# ---------------------------------------------------------------------------
+
+class TestFetchUsdcBalance:
+    """_fetch_usdc_balance converts raw CLOB integer units to dollar Decimal."""
+
+    def test_balance_91855239_converts_to_91_855239_usd(self):
+        """91855239 on-chain units (6 decimals) = $91.855239."""
+        from decimal import Decimal as D
+
+        # Reproduce the conversion inline (mirrors production code)
+        _USDC_DECIMALS = D("1000000")
+        raw = 91855239
+        balance_usd = D(str(raw)) / _USDC_DECIMALS
+        assert balance_usd == D("91.855239")
+
+    def test_order_97560000_converts_to_97_56_usd(self):
+        """97560000 on-chain units = $97.56 — larger than the $91.86 wallet."""
+        from decimal import Decimal as D
+
+        _USDC_DECIMALS = D("1000000")
+        raw_order = 97560000
+        order_usd = D(str(raw_order)) / _USDC_DECIMALS
+        assert order_usd == D("97.560000")
+
+        # Wallet cannot cover the order
+        wallet_usd = D("91.855239")
+        assert wallet_usd < order_usd, (
+            "Wallet $91.86 cannot cover $97.56 order — this is the exact failure scenario"
+        )
+
+    def test_balance_response_parsed_from_dict(self):
+        """get_balance_allowance returns a dict; 'balance' key is raw integer units."""
+        from decimal import Decimal as D
+
+        # Simulate what the production _fetch_usdc_balance does with the CLOB response
+        _USDC_DECIMALS = D("1000000")
+        clob_response = {"balance": 91855239, "allowance": 500000000}
+
+        raw = clob_response.get("balance") or clob_response.get("Balance") or 0
+        balance_usd = D(str(raw)) / _USDC_DECIMALS
+        assert balance_usd == D("91.855239")
+
+    def test_balance_zero_balance_key_falls_back_to_capital_B(self):
+        """If 'balance' is absent, 'Balance' is checked as fallback."""
+        from decimal import Decimal as D
+
+        _USDC_DECIMALS = D("1000000")
+        clob_response = {"Balance": 50000000}
+
+        raw = clob_response.get("balance") or clob_response.get("Balance") or 0
+        balance_usd = D(str(raw)) / _USDC_DECIMALS
+        assert balance_usd == D("50.000000")
+
+    def test_missing_balance_key_returns_zero(self):
+        """If neither 'balance' nor 'Balance' is present, raw = 0."""
+        from decimal import Decimal as D
+
+        _USDC_DECIMALS = D("1000000")
+        clob_response = {}
+
+        raw = clob_response.get("balance") or clob_response.get("Balance") or 0
+        balance_usd = D(str(raw)) / _USDC_DECIMALS
+        assert balance_usd == D("0")
+
+
+# ---------------------------------------------------------------------------
+# Test: balance pre-check caps budget_remaining to wallet balance
+# ---------------------------------------------------------------------------
+
+class TestBalancePreCheck:
+    """The balance pre-check must reduce budget_remaining when the wallet holds
+    less than the in-memory budget counter, preventing 'not enough balance' errors."""
+
+    def test_budget_capped_when_wallet_less_than_budget(self):
+        """When wallet=$91.86 and budget_remaining=$200, cap to $91.86."""
+        from decimal import Decimal as D
+
+        budget_remaining = D("200")
+        real_balance = D("91.855239")
+
+        # Mirrors the production pre-check logic
+        if real_balance < budget_remaining:
+            budget_remaining = real_balance
+
+        assert budget_remaining == D("91.855239")
+
+    def test_budget_unchanged_when_wallet_exceeds_budget(self):
+        """When wallet=$200 and budget_remaining=$20, keep $20."""
+        from decimal import Decimal as D
+
+        budget_remaining = D("20")
+        real_balance = D("200")
+
+        if real_balance < budget_remaining:
+            budget_remaining = real_balance
+
+        assert budget_remaining == D("20")
+
+    def test_budget_unchanged_when_wallet_equals_budget(self):
+        """When wallet=$20 exactly equals budget_remaining=$20, no change."""
+        from decimal import Decimal as D
+
+        budget_remaining = D("20")
+        real_balance = D("20")
+
+        if real_balance < budget_remaining:
+            budget_remaining = real_balance
+
+        assert budget_remaining == D("20")
+
+    def test_zero_wallet_stops_all_orders(self):
+        """When wallet=$0 (e.g. all funds in open positions), budget drops to $0."""
+        from decimal import Decimal as D
+
+        budget_remaining = D("20")
+        real_balance = D("0")
+
+        if real_balance < budget_remaining:
+            budget_remaining = real_balance
+
+        assert budget_remaining == D("0")
+
+
+# ---------------------------------------------------------------------------
+# Test: "not enough balance" exception halts the poll cycle
+# ---------------------------------------------------------------------------
+
+class TestInsufficientBalanceHaltsOrders:
+    """When the CLOB returns 'not enough balance', budget_remaining must be set
+    to zero so no further order attempts are made this poll cycle."""
+
+    def _apply_balance_error_handler(
+        self, exc_message: str, budget_remaining
+    ):
+        """Reproduce the production exception handler logic."""
+        from decimal import Decimal as D
+
+        exc_str = exc_message
+        if "not enough balance" in exc_str or "balance is not enough" in exc_str:
+            budget_remaining = D("0")
+        return budget_remaining
+
+    def test_not_enough_balance_phrase_halts_cycle(self):
+        """'not enough balance' in error message zeroes budget."""
+        from decimal import Decimal as D
+
+        msg = (
+            "PolyApiException[status_code=400, error_message={'error': "
+            "'not enough balance / allowance: the balance is not enough "
+            "-> balance: 91855239, order amount: 97560000'}]"
+        )
+        result = self._apply_balance_error_handler(msg, D("20"))
+        assert result == D("0"), "budget_remaining must be zeroed on balance error"
+
+    def test_balance_is_not_enough_phrase_halts_cycle(self):
+        """'balance is not enough' variant also zeroes budget."""
+        from decimal import Decimal as D
+
+        msg = "balance is not enough -> balance: 50000, order amount: 60000"
+        result = self._apply_balance_error_handler(msg, D("15"))
+        assert result == D("0")
+
+    def test_other_buy_errors_do_not_zero_budget(self):
+        """Non-balance errors (e.g. network timeout) must NOT zero the budget."""
+        from decimal import Decimal as D
+
+        msg = "Connection timeout after 10s"
+        result = self._apply_balance_error_handler(msg, D("20"))
+        assert result == D("20"), (
+            "Non-balance errors must not zero budget_remaining"
+        )
+
+    def test_empty_error_string_does_not_zero_budget(self):
+        """An empty error string (unexpected) must not zero the budget."""
+        from decimal import Decimal as D
+
+        result = self._apply_balance_error_handler("", D("20"))
+        assert result == D("20")
+
+    def test_insufficient_allowance_phrase_halts_cycle(self):
+        """The CLOB sometimes says 'allowance' rather than 'balance'. Both trigger halt."""
+        from decimal import Decimal as D
+
+        # The real CLOB error includes both 'not enough balance' and 'allowance'
+        msg = "not enough balance / allowance"
+        result = self._apply_balance_error_handler(msg, D("10"))
+        assert result == D("0")

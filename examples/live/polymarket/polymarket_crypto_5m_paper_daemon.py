@@ -132,26 +132,47 @@ class RecoverableDaemonError(RuntimeError):
 _NODE_BUILD_TIMEOUT_SECS = 180
 
 
-def _node_build_with_sigalrm(node: Any) -> None:
-    """Call node.build() with a SIGALRM hard timeout.
+def _run_with_timeout(fn: Any, timeout_secs: int = _NODE_BUILD_TIMEOUT_SECS) -> Any:
+    """Run a callable with a hard timeout using a lightweight shell watchdog.
 
-    node.build() makes synchronous HTTP calls (instrument loading) that can
-    block the event loop indefinitely.  asyncio.wait_for cannot interrupt it;
-    SIGALRM fires even while the loop is blocked.
+    TradingNode.__init__() blocks indefinitely inside Cython (Redis MessageBus
+    setup) while holding the Python GIL.  Thread-based watchdogs cannot fire
+    while the GIL is held.
+
+    Solution: spawn a /bin/sh subprocess that sleeps then sends SIGKILL.
+    sh + sleep are tiny binaries that survive memory pressure (no Python
+    interpreter overhead, safe from OOM-killer).  The watchdog is independent
+    of the parent's GIL and memory state.
     """
+    import subprocess
 
-    def _alarm_handler(signum: int, frame: object) -> None:  # noqa: ARG001
-        raise RecoverableDaemonError(
-            f"node.build() timed out after {_NODE_BUILD_TIMEOUT_SECS}s"
-        )
+    _pid = os.getpid()
 
-    old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
-    signal.alarm(_NODE_BUILD_TIMEOUT_SECS)
+    # Watchdog: sh built-in kill (no external kill binary needed), sleep from /usr/bin/sleep
+    watchdog_proc = subprocess.Popen(
+        ["/bin/sh", "-c", f"sleep {timeout_secs}; kill -9 {_pid}"],
+        close_fds=True,
+    )
+
+    def _cancel_watchdog() -> None:
+        try:
+            watchdog_proc.terminate()
+            watchdog_proc.wait(timeout=2)
+        except Exception:
+            pass
+
     try:
-        node.build()
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+        result = fn()
+        _cancel_watchdog()
+        return result
+    except Exception:
+        _cancel_watchdog()
+        raise
+
+
+def _node_build_with_sigalrm(node: Any) -> None:
+    """Build a TradingNode with a hard timeout (kept for backward compat)."""
+    _run_with_timeout(node.build)
 
 
 class JsonlRunWriter:
@@ -161,8 +182,7 @@ class JsonlRunWriter:
 
     def write(self, payload: dict[str, Any]) -> None:
         with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True))
-            handle.write("\n")
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
             handle.flush()
 
 
@@ -254,6 +274,10 @@ def build_daemon_node_config(
     cache_host: str,
     cache_port: int,
 ) -> TradingNodeConfig:
+    # Note: cache_host/cache_port are accepted for API compatibility but not used.
+    # The VPN routing table (NordVPN policy rules) routes Docker-internal IPs through
+    # the VPN tunnel, making Redis unreachable from inside VPN-connected containers.
+    # In-memory cache/message-bus is sufficient: the daemon is stateless across rounds.
     instrument_provider_config = PolymarketInstrumentProviderConfig(load_ids=frozenset(instrument_ids))
     return TradingNodeConfig(
         trader_id=TraderId(trader_id),
@@ -267,7 +291,7 @@ def build_daemon_node_config(
             snapshot_positions_interval_secs=5.0,
         ),
         cache=CacheConfig(
-            database=DatabaseConfig(host=cache_host, port=cache_port),
+            database=None,  # in-memory only — Redis unreachable via VPN routing
             timestamps_as_iso8601=True,
             persist_account_events=True,
             buffer_interval_ms=100,
@@ -275,7 +299,7 @@ def build_daemon_node_config(
             use_instance_id=True,
         ),
         message_bus=MessageBusConfig(
-            database=DatabaseConfig(host=cache_host, port=cache_port),
+            database=None,  # in-memory only — Redis unreachable via VPN routing
             timestamps_as_iso8601=True,
             buffer_interval_ms=100,
             streams_prefix="polymarket-5m",
@@ -303,7 +327,7 @@ def build_daemon_node_config(
                 venue=str(POLYMARKET_VENUE),
                 base_currency=str(USDC_POS),
                 account_type="CASH",
-                starting_balances=[f"1_000 {USDC_POS}"],
+                starting_balances=[f"100 {USDC_POS}"],
                 fee_model_path="nautilus_trader.adapters.polymarket.fee_model.PolymarketFeeModel",
             ),
         },
@@ -319,7 +343,7 @@ def _build_paper_strategy(
     preset: Any,
     instrument_id: Any,
     market_end_time: datetime,
-    order_qty: Decimal = Decimal(10),
+    order_qty: Decimal = Decimal(5),
     token_side: Literal["up", "down"] = "up",
 ) -> PolymarketCrypto5mPaperStrategy:
     normalized_side = _normalize_token_side(token_side)
@@ -597,21 +621,28 @@ async def _default_run_round(
         cache_host=os.getenv("NAUTILUS_CACHE_HOST", DEFAULT_CACHE_HOST),
         cache_port=int(os.getenv("NAUTILUS_CACHE_PORT", str(DEFAULT_CACHE_PORT))),
     )
-    node = TradingNode(config=config)
+    # Wrap TradingNode creation AND build in a single watchdog — the hang
+    # occurs inside TradingNode.__init__ (kernel setup / Redis connection),
+    # before node.build() is called, so the watchdog must start first.
+    def _create_and_build() -> TradingNode:
+        n = TradingNode(config=config)
+        for token_side, instrument_id in instrument_ids_by_side.items():
+            for preset in presets:
+                strategy = _build_paper_strategy(
+                    preset=preset,
+                    instrument_id=instrument_id,
+                    market_end_time=session.end_time,
+                    token_side=_normalize_token_side(token_side),
+                )
+                n.trader.add_strategy(strategy)
+                strategy_ids_by_preset[_strategy_key_for_preset(preset, token_side)] = strategy.id
+        n.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
+        n.add_exec_client_factory(POLYMARKET, SandboxLiveExecClientFactory)
+        n.build()
+        return n
+
     strategy_ids_by_preset: dict[str, StrategyId] = {}
-    for token_side, instrument_id in instrument_ids_by_side.items():
-        for preset in presets:
-            strategy = _build_paper_strategy(
-                preset=preset,
-                instrument_id=instrument_id,
-                market_end_time=session.end_time,
-                token_side=_normalize_token_side(token_side),
-            )
-            node.trader.add_strategy(strategy)
-            strategy_ids_by_preset[_strategy_key_for_preset(preset, token_side)] = strategy.id
-    node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
-    node.add_exec_client_factory(POLYMARKET, SandboxLiveExecClientFactory)
-    _node_build_with_sigalrm(node)
+    node = _run_with_timeout(_create_and_build)
 
     now = datetime.now(tz=UTC)
     runtime_seconds = max(

@@ -56,8 +56,12 @@ DEFAULT_CLOB_HOST = "https://clob.polymarket.com"
 POSITION_REFRESH_SECS = 30.0
 
 # Sell buffer: Polymarket deducts taker fees from received tokens at fill time,
-# so record share count is slightly above actual balance.
-SELL_BUFFER = Decimal("0.03")
+# so recorded share count is above actual token balance.  Use a percentage-
+# based buffer (3%) rather than a fixed amount so it scales with position size.
+SELL_BUFFER_PCT = Decimal("0.03")  # sell 97% of recorded shares
+
+# Maximum sell retries per position before giving up until next refresh cycle.
+MAX_SELL_RETRIES = 3
 
 # Default thresholds used when a position has no explicit preset values.
 DEFAULT_TAKE_PROFIT = 0.99
@@ -85,6 +89,7 @@ class PositionWatch:
     best_ask: float | None = field(default=None, compare=False)
     # Guard: set True once a sell is submitted so we never double-exit
     exit_submitted: bool = field(default=False, compare=False)
+    sell_retries: int = field(default=0, compare=False)
 
     @property
     def mid(self) -> float | None:
@@ -117,8 +122,7 @@ class JsonlRunWriter:
 
     def write(self, payload: dict[str, Any]) -> None:
         with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, sort_keys=True))
-            fh.write("\n")
+            fh.write(json.dumps(payload, sort_keys=True) + "\n")
             fh.flush()
 
 
@@ -254,7 +258,9 @@ def _submit_sell(position: PositionWatch, clob_client: Any, reason: str) -> dict
     from py_clob_client.clob_types import MarketOrderArgs, OrderType
     from py_clob_client.order_builder.constants import SELL
 
-    qty = Decimal(str(position.shares)) - SELL_BUFFER
+    shares_dec = Decimal(str(position.shares))
+    qty = shares_dec - (shares_dec * SELL_BUFFER_PCT)
+    qty = qty.quantize(Decimal("0.01"))  # round down to 2 dp
     if qty <= Decimal("0"):
         raise ValueError(f"Position too small after sell buffer: shares={position.shares}")
 
@@ -402,8 +408,69 @@ async def _process_message(
     writer: JsonlRunWriter,
     clob_client: Any,
 ) -> None:
-    """Update position state from a WS message and trigger exit if threshold crossed."""
+    """Update position state from a WS message and trigger exit if threshold crossed.
+
+    The CLOB WebSocket sends two message formats:
+
+    1. **Initial snapshot** (on subscribe):
+       ``{"asset_id": "...", "bids": [...], "asks": [...], ...}``
+
+    2. **Price-change events** (ongoing):
+       ``{"price_changes": [{"asset_id": "...", "best_bid": "0.58", "best_ask": "0.72"}, ...]}``
+
+    We must handle both.  For the initial snapshot we extract best bid/ask
+    from the top of the ``bids``/``asks`` arrays (already sorted best-first).
+    """
+    # --- Route 1: price_changes array (most common) ---
+    price_changes = msg.get("price_changes")
+    if price_changes and isinstance(price_changes, list):
+        for change in price_changes:
+            if not isinstance(change, dict):
+                continue
+            await _apply_price_update(
+                token_id=str(change.get("asset_id") or "").strip(),
+                bid=change.get("best_bid"),
+                ask=change.get("best_ask"),
+                watches=watches,
+                watches_lock=watches_lock,
+                writer=writer,
+                clob_client=clob_client,
+            )
+        return
+
+    # --- Route 2: initial snapshot with bids/asks arrays ---
     token_id = str(msg.get("asset_id") or msg.get("asset") or "").strip()
+    if not token_id:
+        return
+
+    bids = msg.get("bids") or []
+    asks = msg.get("asks") or []
+    # bids and asks are [{"price": "0.55", "size": "100"}, ...] sorted best-first
+    best_bid = bids[-1]["price"] if bids else msg.get("best_bid")
+    best_ask = asks[0]["price"] if asks else msg.get("best_ask")
+
+    await _apply_price_update(
+        token_id=token_id,
+        bid=best_bid,
+        ask=best_ask,
+        watches=watches,
+        watches_lock=watches_lock,
+        writer=writer,
+        clob_client=clob_client,
+    )
+
+
+async def _apply_price_update(
+    *,
+    token_id: str,
+    bid: Any,
+    ask: Any,
+    watches: dict[str, PositionWatch],
+    watches_lock: asyncio.Lock,
+    writer: JsonlRunWriter,
+    clob_client: Any,
+) -> None:
+    """Apply a bid/ask update to a watched position and trigger exit if threshold crossed."""
     if not token_id:
         return
 
@@ -412,8 +479,6 @@ async def _process_message(
         if pos is None or pos.exit_submitted:
             return
 
-        bid = msg.get("best_bid")
-        ask = msg.get("best_ask")
         if bid not in (None, ""):
             try:
                 pos.best_bid = float(bid)
@@ -432,6 +497,9 @@ async def _process_message(
         else:
             return
 
+        if pos.sell_retries >= MAX_SELL_RETRIES:
+            return  # exhausted retries, wait for next refresh cycle to reset
+
         # Mark as submitted immediately under the lock to prevent concurrent triggers
         pos.exit_submitted = True
         mid_at_trigger = pos.mid
@@ -447,10 +515,13 @@ async def _process_message(
             reason.upper(), pos.market_slug, sell_price, event["pnl"],
         )
     except Exception as exc:
-        log.error("SELL FAILED for %s: %s — position remains open", pos.market_slug, exc)
-        # Unmark so next price event can retry
+        log.error("SELL FAILED for %s: %s (attempt %d/%d)",
+                  pos.market_slug, exc, pos.sell_retries + 1, MAX_SELL_RETRIES)
         async with watches_lock:
-            pos.exit_submitted = False
+            pos.sell_retries += 1
+            if pos.sell_retries < MAX_SELL_RETRIES:
+                pos.exit_submitted = False  # allow retry on next tick
+            # else: leave exit_submitted=True to stop further attempts
 
 
 # ---------------------------------------------------------------------------

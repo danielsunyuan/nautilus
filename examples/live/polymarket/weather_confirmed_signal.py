@@ -39,6 +39,14 @@ MAX_ENTRY_PRICE: dict[StrategyId, float] = {
     "B2": 0.93,
 }
 
+# Minimum acceptable CLOB price for each strategy (below this, likely thin/mispriced)
+# Prevents the "cheap bucket trap" — low-priced exact-band entries that cluster into losses
+MIN_ENTRY_PRICE: dict[StrategyId, float] = {
+    "A1": 0.85,
+    "A2": 0.85,
+    "B2": 0.80,
+}
+
 # Minimum confirmation polls before entering A1/A2
 MIN_CONFIRM_POLLS = 2
 

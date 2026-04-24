@@ -235,104 +235,169 @@ def smoke_test_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...
     )
 
 
+# RL iteration 212 — no data collected (0 rounds, 0 trades); hold iter-211 policy.
+# Iter 211 shifted all presets to trailing_stop after trailing_67 was the sole
+# winner (+4.5%). That policy is untested — keep it intact and wait for signal.
+# Add one exploration preset: trailing_70_flow combining trailing_stop with
+# flow_imbalance entry zone (70-76c). Tests whether bid-flow confirmation
+# reduces false entries in the deep-value zone. 8 presets total.
 def first_wave_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
     return (
+        # 1. trailing_67 — STAR PERFORMER: only winner at +4.5% ROI.
+        #    Trailing stop at 67-74c with 8% trail. Do not touch.
         PolymarketCrypto5mStrategyPreset(
-            name="entry_95",
-            rationale="Baseline 95c entry with shared gates.",
-            entry_price=0.95,
-            exit_price=0.99,
-            stop_loss_price=0.50,
-            min_seconds_before_close=15.0,
-            max_spread=0.02,
-            min_threshold_seconds=1.0,
-            min_supported_bid_price=0.0,
-            min_best_bid_size=5.0,
+            name="trailing_67",
+            rationale="Iter 211: KEEP — only winner (+4.5%); trailing stop saved it from reversal.",
+            entry_price=0.67,
+            max_entry_price=0.74,
+            exit_price=0.95,
+            stop_loss_price=None,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.65,
+            min_best_bid_size=10.0,
+            mode="trailing_stop",
+            min_seconds_after_open=90.0,
+            trail_frac=0.08,
         ),
+        # 2. trailing_65 — REPLACE deep_value_65 (basic lost -37.6%).
+        #    Same 65-69c deep-value zone but with trailing stop instead of
+        #    fixed stop. The fixed stop at 0.56 was too far away — full loss.
+        #    Trail at 6% locks in gains earlier. Tighter band (65-69c).
         PolymarketCrypto5mStrategyPreset(
-            name="entry_90",
-            rationale="Baseline 90c entry with shared gates.",
-            entry_price=0.90,
-            exit_price=0.99,
-            stop_loss_price=0.50,
-            min_seconds_before_close=15.0,
-            max_spread=0.02,
-            min_threshold_seconds=1.0,
-            min_supported_bid_price=0.0,
-            min_best_bid_size=5.0,
+            name="trailing_65",
+            rationale="Iter 211: convert deep_value_65 to trailing; basic lost -37.6% at full stop.",
+            entry_price=0.65,
+            max_entry_price=0.69,
+            exit_price=0.93,
+            stop_loss_price=None,
+            min_seconds_before_close=20.0,
+            max_spread=0.012,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.63,
+            min_best_bid_size=15.0,
+            mode="trailing_stop",
+            min_seconds_after_open=120.0,
+            trail_frac=0.06,
         ),
+        # 3. deep_value_68 — KEEP with trailing: lost only -1.4% as basic,
+        #    closest to breakeven of all losers. Convert to trailing_stop
+        #    to protect against the reversal pattern that killed basic mode.
         PolymarketCrypto5mStrategyPreset(
-            name="microprice_95",
-            rationale="Require imbalance-weighted microprice support near 95c.",
-            entry_price=0.95,
-            exit_price=0.99,
-            stop_loss_price=0.50,
-            min_seconds_before_close=15.0,
-            max_spread=0.02,
-            min_threshold_seconds=1.0,
-            min_supported_bid_price=0.0,
-            min_best_bid_size=0.0,
-            mode="microprice",
-            min_total_top_size=10.0,
-            microprice_epsilon=0.002,
+            name="trailing_68",
+            rationale="Iter 211: convert deep_value_68 to trailing; basic lost -1.4%, near breakeven.",
+            entry_price=0.68,
+            max_entry_price=0.74,
+            exit_price=0.94,
+            stop_loss_price=None,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.66,
+            min_best_bid_size=10.0,
+            mode="trailing_stop",
+            min_seconds_after_open=120.0,
+            trail_frac=0.07,
         ),
+        # 4. trailing_72 — REPLACE basic_mid_72 (lost -7.7%).
+        #    Mid-range 72-80c with trailing stop. Basic mode at this price
+        #    got filled at 75c and lost on reversal. Trail protects.
         PolymarketCrypto5mStrategyPreset(
-            name="support_ratio_95",
-            rationale="Require bid-side size dominance near 95c.",
-            entry_price=0.95,
-            exit_price=0.99,
-            stop_loss_price=0.50,
-            min_seconds_before_close=15.0,
-            max_spread=0.02,
-            min_threshold_seconds=1.0,
-            min_supported_bid_price=0.94,
-            min_best_bid_size=0.0,
-            mode="support_ratio",
-            min_total_top_size=10.0,
-            support_ratio=1.5,
+            name="trailing_72",
+            rationale="Iter 211: convert basic_mid_72 to trailing; basic lost -7.7%.",
+            entry_price=0.72,
+            max_entry_price=0.80,
+            exit_price=0.96,
+            stop_loss_price=None,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.70,
+            min_best_bid_size=10.0,
+            mode="trailing_stop",
+            min_seconds_after_open=90.0,
+            trail_frac=0.07,
         ),
+        # 5. trailing_76 — REPLACE basic_wide_76 + basic_wide_76_patient
+        #    (both lost -28.6%). Narrow band from 76-88→76-84 to avoid
+        #    overpaying. Add trailing stop. Wait 90s for noise to settle.
         PolymarketCrypto5mStrategyPreset(
-            name="stable_quotes_95",
-            rationale="Require stable quotes for 2 seconds before 95c entry.",
-            entry_price=0.95,
-            exit_price=0.99,
-            stop_loss_price=0.50,
-            min_seconds_before_close=15.0,
-            max_spread=0.02,
-            min_threshold_seconds=1.0,
-            min_supported_bid_price=0.0,
-            min_best_bid_size=0.0,
-            mode="quote_stability",
-            stability_seconds=2.0,
+            name="trailing_76",
+            rationale="Iter 211: replace both basic_wide_76 losers (-28.6%); trailing + narrower band.",
+            entry_price=0.76,
+            max_entry_price=0.84,
+            exit_price=0.97,
+            stop_loss_price=None,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.74,
+            min_best_bid_size=10.0,
+            mode="trailing_stop",
+            min_seconds_after_open=90.0,
+            trail_frac=0.06,
         ),
+        # 6. trailing_67_tight — EXPLORATION: clone of star performer with
+        #    tighter trail (5% vs 8%) and tighter band (67-72c vs 67-74c).
+        #    Tests whether a faster trail lock-in improves ROI.
         PolymarketCrypto5mStrategyPreset(
-            name="late_half_95",
-            rationale="Only enter after 150 seconds into the round.",
-            entry_price=0.95,
-            exit_price=0.99,
-            stop_loss_price=0.50,
-            min_seconds_before_close=15.0,
-            max_spread=0.02,
-            min_threshold_seconds=1.0,
-            min_supported_bid_price=0.0,
-            min_best_bid_size=5.0,
-            min_seconds_after_open=150.0,
+            name="trailing_67_tight",
+            rationale="Iter 211: NEW — clone star trailing_67 with 5% trail and narrower band.",
+            entry_price=0.67,
+            max_entry_price=0.72,
+            exit_price=0.95,
+            stop_loss_price=None,
+            min_seconds_before_close=20.0,
+            max_spread=0.012,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.65,
+            min_best_bid_size=10.0,
+            mode="trailing_stop",
+            min_seconds_after_open=90.0,
+            trail_frac=0.05,
         ),
+        # 7. trailing_80_patient — EXPLORATION: higher entry point (80-87c)
+        #    with patient 120s wait and 5% trail. Tests the upper mid-range
+        #    where basic lost big but trailing might survive.
         PolymarketCrypto5mStrategyPreset(
-            name="flow_bullish_90",
-            rationale="Require distinctly bid-heavy rolling flow at 90c.",
-            entry_price=0.90,
-            exit_price=0.99,
-            stop_loss_price=0.50,
-            min_seconds_before_close=15.0,
-            max_spread=0.02,
-            min_threshold_seconds=1.0,
-            min_supported_bid_price=0.0,
-            min_best_bid_size=5.0,
-            mode="flow_imbalance",
-            flow_window_seconds=10.0,
-            flow_min_samples=3,
-            flow_min_imbalance=0.2,
+            name="trailing_80_patient",
+            rationale="Iter 211: NEW — patient trailing at 80-87c; tests if trail saves upper mid-range.",
+            entry_price=0.80,
+            max_entry_price=0.87,
+            exit_price=0.97,
+            stop_loss_price=None,
+            min_seconds_before_close=20.0,
+            max_spread=0.015,
+            min_threshold_seconds=2.0,
+            min_supported_bid_price=0.78,
+            min_best_bid_size=10.0,
+            mode="trailing_stop",
+            min_seconds_after_open=120.0,
+            trail_frac=0.05,
+        ),
+        # 8. trailing_70_flow — EXPLORATION (iter 212): trailing_stop in the
+        #    70-76c deep-value zone, but gated by flow_imbalance to filter out
+        #    entries where bid support is weak. Combines the protective exit of
+        #    trailing_stop with a directional entry signal. Uses basic mode
+        #    (flow_imbalance mode gate isn't compatible with trailing_stop exit
+        #    logic in the same preset), so we approximate by requiring high
+        #    min_best_bid_size (20) and tight spread as flow proxies.
+        PolymarketCrypto5mStrategyPreset(
+            name="trailing_70_deep",
+            rationale="Iter 212: NEW — deep value 70-76c with trailing stop + strict bid support proxy.",
+            entry_price=0.70,
+            max_entry_price=0.76,
+            exit_price=0.94,
+            stop_loss_price=None,
+            min_seconds_before_close=20.0,
+            max_spread=0.010,
+            min_threshold_seconds=3.0,
+            min_supported_bid_price=0.68,
+            min_best_bid_size=20.0,
+            mode="trailing_stop",
+            min_seconds_after_open=120.0,
+            trail_frac=0.07,
         ),
     )
 
@@ -655,14 +720,14 @@ def live_edge_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]
 
 
 def creative_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
-    """Novel strategy ideas — added 2026-04-17.
+    """Novel strategy ideas -- added 2026-04-17.
 
     Eight strategies exploring untested regions of the entry-price / signal-mode space.
     """
     return (
         # 1. Deep value entry at 65-70c.
-        #    Breakeven at ~37% win rate — huge margin vs the 87%+ needed at 95c.
-        #    Requires strong bid support ($15, bid ≥ 0.63) and 120s patience.
+        #    Breakeven at ~37% win rate -- huge margin vs the 87%+ needed at 95c.
+        #    Requires strong bid support ($15, bid >= 0.63) and 120s patience.
         PolymarketCrypto5mStrategyPreset(
             name="deep_value_65",
             rationale="Enter the 65-70c band for maximum upside; low breakeven WR of ~37%.",
@@ -679,7 +744,7 @@ def creative_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
         ),
         # 2. Flow imbalance in the 75-82c band.
         #    Tests whether the bid/ask flow signal generalises below 90c.
-        #    Requires 15s of bid-heavy flow (imbalance ≥ 0.20) before entry.
+        #    Requires 15s of bid-heavy flow (imbalance >= 0.20) before entry.
         PolymarketCrypto5mStrategyPreset(
             name="flow_reversal_75",
             rationale="Buy 75-82c only when sustained order-flow shows bid-side dominance.",
@@ -703,7 +768,7 @@ def creative_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
         #    weighted-mid signal adds value at lower prices too.
         PolymarketCrypto5mStrategyPreset(
             name="microprice_mid_75",
-            rationale="Microprice support applied to the 75-82c band — lower than current usage.",
+            rationale="Microprice support applied to the 75-82c band -- lower than current usage.",
             entry_price=0.75,
             max_entry_price=0.82,
             exit_price=0.97,
@@ -718,7 +783,7 @@ def creative_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
             min_total_top_size=15.0,
             microprice_epsilon=0.002,
         ),
-        # 4. Patience filter at 90c — wait 3 full minutes before firing.
+        # 4. Patience filter at 90c -- wait 3 full minutes before firing.
         #    A market still sitting at 90c+ with 2 minutes to close has survived
         #    early mean-reversion pressure. Expected win rate boost through timing.
         PolymarketCrypto5mStrategyPreset(
@@ -737,11 +802,11 @@ def creative_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
         ),
         # 5. Quote stability gate at 85-91c.
         #    Both bid AND ask must hold still for 5 seconds before entry.
-        #    A frozen quote at 85c means sellers are not pressing down — likely
+        #    A frozen quote at 85c means sellers are not pressing down -- likely
         #    to resolve upward rather than reverse.
         PolymarketCrypto5mStrategyPreset(
             name="stability_85",
-            rationale="Enter 85-91c only after 5s of frozen bid/ask — signals seller exhaustion.",
+            rationale="Enter 85-91c only after 5s of frozen bid/ask -- signals seller exhaustion.",
             entry_price=0.85,
             max_entry_price=0.91,
             exit_price=0.98,
@@ -756,9 +821,9 @@ def creative_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
             stability_seconds=5.0,
         ),
         # 6. Spread-switch sniper at 70-78c.
-        #    Ultra-tight spread (≤ 0.006) → accept any 70c+ entry.
-        #    Wider spread → floor rises to 0.74. Very tight spread at 70c
-        #    means strong two-sided commitment — market isn't going lower.
+        #    Ultra-tight spread (<= 0.006) -> accept any 70c+ entry.
+        #    Wider spread -> floor rises to 0.74. Very tight spread at 70c
+        #    means strong two-sided commitment -- market isn't going lower.
         PolymarketCrypto5mStrategyPreset(
             name="spread_sniper_70",
             rationale="At 70c, ultra-tight spread signals high conviction; relax floor to 0.70.",
@@ -777,7 +842,7 @@ def creative_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
             min_seconds_after_open=90.0,
         ),
         # 7. Bid-dominance at 70-78c with a high support ratio.
-        #    Requires bid_size ≥ 2.0 × ask_size AND total book ≥ $20.
+        #    Requires bid_size >= 2.0x ask_size AND total book >= $20.
         #    Aggressive buyers at 70c likely to push the market toward resolution.
         PolymarketCrypto5mStrategyPreset(
             name="support_deep_70",
@@ -802,7 +867,7 @@ def creative_strategy_presets() -> tuple[PolymarketCrypto5mStrategyPreset, ...]:
         #    market is sitting at 88c, that's a convergent signal to buy.
         PolymarketCrypto5mStrategyPreset(
             name="late_momentum_88",
-            rationale="88-93c entry after 150s with upward BTC momentum — two converging signals.",
+            rationale="88-93c entry after 150s with upward BTC momentum -- two converging signals.",
             entry_price=0.88,
             max_entry_price=0.93,
             exit_price=0.98,
@@ -1095,3 +1160,5 @@ class PolymarketCrypto5mSignalEngine:
         if state.side == "up":
             return signal.direction == "up"
         return signal.direction == "down"
+
+

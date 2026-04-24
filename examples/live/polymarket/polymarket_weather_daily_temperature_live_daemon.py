@@ -44,25 +44,14 @@ from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon 
 from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import DEFAULT_OUTPUT_DIR
 from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import JsonlRunWriter
 from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import RecoverableDaemonError
-from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import _build_instrument_id
 from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import _build_parser
 from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import _default_resolve_markets
-from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import _as_decimal
 from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import _backoff_delay
 from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import _env_first
-from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import _iso8601_from_unix_nanos
 from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import _compute_total_deployed
 from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import _strategy_presets_for_set
 from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import build_output_path
-from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import extract_weather_strategy_results
-from examples.live.polymarket.polymarket_weather_daily_temperature_paper_daemon import run_daemon
-from examples.live.polymarket.weather_daily_temperature_live_strategy import WeatherDailyTemperaturePaperStrategy
-from examples.live.polymarket.weather_daily_temperature_live_strategy import WeatherDailyTemperaturePaperStrategyConfig
 from examples.live.polymarket.weather_daily_temperature_resolver import DailyTemperatureMarket
-from examples.live.polymarket.weather_temperature_data_client import (
-    WundergroundDataClientConfig,
-    WundergroundDataClientFactory,
-)
 try:
     from examples.live.polymarket.weather_wunderground_fetcher import CITY_STATIONS as _CITY_STATIONS
 except ModuleNotFoundError:
@@ -74,23 +63,6 @@ except ModuleNotFoundError:
     _wu_mod = _ilu.module_from_spec(_wu_spec)  # type: ignore[arg-type]
     _wu_spec.loader.exec_module(_wu_mod)  # type: ignore[union-attr]
     _CITY_STATIONS = _wu_mod.CITY_STATIONS
-from nautilus_trader.adapters.polymarket import POLYMARKET
-from nautilus_trader.adapters.polymarket import PolymarketDataClientConfig
-from nautilus_trader.adapters.polymarket import PolymarketExecClientConfig
-from nautilus_trader.adapters.polymarket import PolymarketLiveDataClientFactory
-from nautilus_trader.adapters.polymarket import PolymarketLiveExecClientFactory
-from nautilus_trader.adapters.polymarket.providers import PolymarketInstrumentProviderConfig
-from nautilus_trader.config import CacheConfig
-from nautilus_trader.config import DatabaseConfig
-from nautilus_trader.config import LiveExecEngineConfig
-from nautilus_trader.config import LoggingConfig
-from nautilus_trader.config import MessageBusConfig
-from nautilus_trader.config import TradingNodeConfig
-from nautilus_trader.live.node import TradingNode
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.identifiers import StrategyId
-from nautilus_trader.model.identifiers import TraderId
-from nautilus_trader.portfolio.config import PortfolioConfig
 
 _log = __import__("logging").getLogger(__name__)
 
@@ -169,6 +141,13 @@ def _city_local_date(city: str) -> "date":
     return datetime.now(tz).date()
 
 
+# UTC hour at which a new trading session begins.  Everything before this hour
+# belongs to the previous calendar day's session.  09:00 UTC gives a 1-hour
+# buffer even in the worst-case winter offset (e.g. LA UTC-8 = 01:00 local).
+# If a new city is added whose local midnight exceeds 08:00 UTC, raise this value.
+SESSION_END_HOUR_UTC: int = 9
+
+
 def _session_trading_day(now: datetime) -> "date":
     """Return the trading day that *now* belongs to.
 
@@ -231,385 +210,6 @@ def _ensure_clob_credentials() -> None:
     _log.info("CLOB credentials derived and set in environment.")
 
 
-def build_live_daemon_node_config(
-    *,
-    instrument_ids: list[str],
-    trader_id: str,
-    cache_host: str,
-    cache_port: int,
-) -> TradingNodeConfig:
-    instrument_provider_config = PolymarketInstrumentProviderConfig(
-        load_ids=frozenset(instrument_ids),
-        use_gamma_markets=True,  # Use Gamma API batched calls (~6×100) vs CLOB bulk pagination (500k+ markets)
-    )
-    return TradingNodeConfig(
-        trader_id=TraderId(trader_id),
-        logging=LoggingConfig(log_level="INFO", use_pyo3=True),
-        exec_engine=LiveExecEngineConfig(
-            reconciliation=False,
-            open_check_interval_secs=5.0,
-            open_check_open_only=True,
-            snapshot_orders=True,
-            snapshot_positions=True,
-            snapshot_positions_interval_secs=5.0,
-            graceful_shutdown_on_exception=True,
-            allow_overfills=True,  # Polymarket FOK fills return fractional share differences due to USDC→shares rounding
-        ),
-        cache=CacheConfig(
-            database=DatabaseConfig(host=cache_host, port=cache_port),
-            timestamps_as_iso8601=True,
-            persist_account_events=True,
-            buffer_interval_ms=100,
-            flush_on_start=False,
-            use_instance_id=True,
-        ),
-        message_bus=MessageBusConfig(
-            database=DatabaseConfig(host=cache_host, port=cache_port),
-            timestamps_as_iso8601=True,
-            buffer_interval_ms=100,
-            streams_prefix="polymarket-weather-live",
-            use_trader_prefix=True,
-            use_trader_id=True,
-            use_instance_id=True,
-            stream_per_topic=False,
-            autotrim_mins=60,
-            heartbeat_interval_secs=1,
-        ),
-        portfolio=PortfolioConfig(min_account_state_logging_interval_ms=1_000),
-        data_clients={
-            POLYMARKET: PolymarketDataClientConfig(
-                instrument_config=instrument_provider_config,
-                private_key=_env_first("POLYMARKET_PRIVATE_KEY", "POLYMARKET_PK"),
-                signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
-                funder=_env_first("POLYMARKET_FUNDER_ADDRESS", "POLYMARKET_FUNDER"),
-                api_key=_env_first("POLYMARKET_CLOB_API_KEY", "POLYMARKET_API_KEY"),
-                api_secret=_env_first("POLYMARKET_CLOB_API_SECRET", "POLYMARKET_API_SECRET"),
-                passphrase=_env_first("POLYMARKET_CLOB_PASSPHRASE", "POLYMARKET_PASSPHRASE"),
-                base_url_http=_env_first("POLYMARKET_CLOB_HOST"),
-                update_instruments_interval_mins=None,  # Disable mid-session refresh; each session reloads at startup
-                ws_connection_initial_delay_secs=1.0,  # Reduced from 5s default; all 539 subscriptions queue in <100ms
-                ws_max_subscriptions_per_connection=500,  # Polymarket's actual limit; 539 markets → 2 connections vs default 3
-            ),
-            "WEATHER": WundergroundDataClientConfig(
-                poll_interval_secs=900,
-                cities=(),  # poll all 50 cities
-            ),
-        },
-        exec_clients={
-            POLYMARKET: PolymarketExecClientConfig(
-                instrument_config=instrument_provider_config,
-                private_key=_env_first("POLYMARKET_PRIVATE_KEY", "POLYMARKET_PK"),
-                signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
-                funder=_env_first("POLYMARKET_FUNDER_ADDRESS", "POLYMARKET_FUNDER"),
-                api_key=_env_first("POLYMARKET_CLOB_API_KEY", "POLYMARKET_API_KEY"),
-                api_secret=_env_first("POLYMARKET_CLOB_API_SECRET", "POLYMARKET_API_SECRET"),
-                passphrase=_env_first("POLYMARKET_CLOB_PASSPHRASE", "POLYMARKET_PASSPHRASE"),
-                base_url_http=_env_first("POLYMARKET_CLOB_HOST"),
-                generate_order_history_from_trades=False,
-            ),
-        },
-        timeout_connection=300.0,  # Instrument bulk-load paginates all Polymarket markets (~140k+, ~100-150s); wait for it before starting strategies
-        timeout_reconciliation=10.0,
-        timeout_portfolio=10.0,
-        timeout_disconnection=10.0,
-        timeout_post_stop=5.0,
-    )
-
-
-# How often to scan the cache for newly-opened positions and flush them to JSONL.
-_POSITION_POLL_SECS = 30.0
-
-# Pause between the end of one session and the start of the next (market refresh).
-_RESTART_PAUSE_SECS = 10.0
-
-# Sessions run from SESSION_END_HOUR_UTC:00 UTC to SESSION_END_HOUR_UTC:00 UTC the next day.
-# Chosen so that all known city markets resolve before the session ends:
-#   Latest city: America/Los_Angeles, midnight = 08:00 UTC in PST winter (UTC-8).
-#   09:00 UTC gives a 1-hour buffer even in the worst-case winter offset.
-# If a new city is added whose local midnight exceeds 08:00 UTC, raise this value.
-SESSION_END_HOUR_UTC: int = 9
-
-
-def _build_node_and_strategies(
-    *,
-    markets: list[DailyTemperatureMarket],
-    preset_set: str,
-    monitoring_markets: list[DailyTemperatureMarket] = (),
-    session_stake_cap: Decimal | None = None,
-) -> tuple[TradingNode, tuple, dict[str, StrategyId]]:
-    """Create a configured TradingNode with strategies attached. Does not call build()."""
-    presets = _strategy_presets_for_set(preset_set)
-    all_markets_for_instruments = list(markets) + list(monitoring_markets)
-    has_no_presets = any(getattr(p, "token_side", "yes") == "no" for p in presets)
-    instrument_ids = [_build_instrument_id(market, "yes") for market in all_markets_for_instruments]
-    if has_no_presets:
-        instrument_ids += [_build_instrument_id(market, "no") for market in all_markets_for_instruments]
-    config = build_live_daemon_node_config(
-        instrument_ids=instrument_ids,
-        trader_id="LIVE-WEATHER-DAEMON",
-        cache_host=os.getenv("NAUTILUS_CACHE_HOST", DEFAULT_CACHE_HOST),
-        cache_port=int(os.getenv("NAUTILUS_CACHE_PORT", str(DEFAULT_CACHE_PORT))),
-    )
-    node = TradingNode(config=config)
-    strategy_ids_by_key: dict[str, StrategyId] = {}
-
-    families: dict[tuple[str, str, str], list[InstrumentId]] = {}
-    for market in all_markets_for_instruments:
-        key = (market.city, str(market.observation_date), market.metric)
-        families.setdefault(key, []).append(InstrumentId.from_str(_build_instrument_id(market, "yes")))
-
-    family_ids_by_slug: dict[str, tuple[InstrumentId, ...]] = {
-        market.slug: tuple(families.get((market.city, str(market.observation_date), market.metric), []))
-        for market in all_markets_for_instruments
-    }
-
-    live_mode = str(preset_set).strip().lower() in {"live_90_basic", "live-weather-v1"}
-    # Cap this session's open stake at the remaining budget (never exceed $50 default either).
-    # At $2/market × 25 positions = $50 max per day.
-    if live_mode:
-        default_cap = Decimal("50")
-        open_stake_cap = min(default_cap, session_stake_cap) if session_stake_cap is not None else default_cap
-    else:
-        open_stake_cap = None
-
-    for market in markets:
-        for preset in presets:
-            side = getattr(preset, "token_side", "yes")
-            inst_id_str = _build_instrument_id(market, side)
-            strategy_key = f"{market.slug}:{preset.name}"
-            strategy = WeatherDailyTemperaturePaperStrategy(
-                config=WeatherDailyTemperaturePaperStrategyConfig(
-                    strategy_id=f"LIVE-WTHR-{preset.name.upper()}",
-                    instrument_id=InstrumentId.from_str(inst_id_str),
-                    preset=preset,
-                    order_qty=Decimal(str(preset.order_qty)),
-                    token_side=side,
-                    family_instrument_ids=family_ids_by_slug.get(market.slug, ()),
-                    target_usd_per_market=(Decimal("2") if live_mode else None),
-                    min_order_size_shares=(Decimal("2") if live_mode else Decimal("0")),
-                    max_stake_per_market=(Decimal("2.10") if live_mode else None),
-                    max_open_positions=(25 if live_mode else None),
-                    max_total_open_stake=open_stake_cap,
-                    city=market.city,
-                    threshold=float(market.threshold_f),
-                    threshold_unit=(_CITY_STATIONS.get(market.city, ("", "", "C", ""))[2]),
-                    band_type=market.band_type,
-                ),
-            )
-            node.trader.add_strategy(strategy)
-            strategy_ids_by_key[strategy_key] = strategy.id
-
-    for market in monitoring_markets:
-        for preset in presets:
-            side = getattr(preset, "token_side", "yes")
-            inst_id_str = _build_instrument_id(market, side)
-            strategy_key = f"{market.slug}:{preset.name}:monitor"
-            strategy = WeatherDailyTemperaturePaperStrategy(
-                config=WeatherDailyTemperaturePaperStrategyConfig(
-                    strategy_id=f"LIVE-WTHR-MON-{preset.name.upper()}",
-                    instrument_id=InstrumentId.from_str(inst_id_str),
-                    preset=preset,
-                    order_qty=Decimal("0"),
-                    token_side=side,
-                    skip_entry=True,
-                ),
-            )
-            node.trader.add_strategy(strategy)
-            strategy_ids_by_key[strategy_key] = strategy.id
-
-    node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
-    node.add_data_client_factory("WEATHER", WundergroundDataClientFactory)
-    node.add_exec_client_factory(POLYMARKET, PolymarketLiveExecClientFactory)
-    return node, presets, strategy_ids_by_key
-
-
-def _flush_new_positions(
-    *,
-    node: TradingNode,
-    markets: list[DailyTemperatureMarket],
-    presets: tuple,
-    strategy_ids_by_key: dict[str, StrategyId],
-    seen_position_ids: set[str],
-    writer: JsonlRunWriter,
-    run_id: str,
-    now_fn: Callable[[], datetime],
-) -> int:
-    """Write any newly-opened positions to JSONL. Returns count written."""
-    written = 0
-    for market in markets:
-        for preset in presets:
-            side = getattr(preset, "token_side", "yes")
-            instrument_id = InstrumentId.from_str(_build_instrument_id(market, side))
-            strategy_key = f"{market.slug}:{preset.name}"
-            strategy_id = strategy_ids_by_key.get(strategy_key)
-            if strategy_id is None:
-                continue
-            try:
-                open_positions = list(node.cache.positions_open(
-                    instrument_id=instrument_id,
-                    strategy_id=strategy_id,
-                ))
-            except Exception:
-                continue
-            for pos in open_positions:
-                pid = str(getattr(pos, "id", id(pos)))
-                if pid in seen_position_ids:
-                    continue
-                seen_position_ids.add(pid)
-                shares = float(_as_decimal(getattr(pos, "peak_qty", None) or pos.quantity))
-                entry_price = float(pos.avg_px_open)
-                stake = float(Decimal(str(entry_price)) * Decimal(str(shares)))
-                writer.write({
-                    "run_id": run_id,
-                    "event": "strategy_result",
-                    "asset_class": "weather",
-                    "weather_market_type": "daily_temperature",
-                    "preset_name": preset.name,
-                    "strategy_name": preset.name,  # canonical field for leaderboard/reports
-                    "arena": preset.arena,
-                    "mode": preset.mode,
-                    "market_slug": market.slug,
-                    "city": market.city,
-                    "observation_date": str(market.observation_date),
-                    "threshold_f": market.threshold_f,
-                    "metric": market.metric,
-                    "token_side": side,
-                    "instrument_id": str(instrument_id),
-                    "entry_price": entry_price,
-                    "shares": shares,
-                    "stake": stake,
-                    "accounting_status": "open",
-                    "resolved": False,
-                    "exit_reason": "position_open",
-                    "entry_time": _iso8601_from_unix_nanos(getattr(pos, "ts_opened", 0)),
-                    "exit_time": None,
-                    "pnl": None,
-                    "stop_loss_price": preset.stop_loss_price,
-                    "take_profit_price": preset.take_profit_price,
-                    "timestamp": now_fn().isoformat(),
-                })
-                written += 1
-    return written
-
-
-def _flush_closed_positions(
-    *,
-    node: TradingNode,
-    markets: list[DailyTemperatureMarket],
-    presets: tuple,
-    strategy_ids_by_key: dict[str, StrategyId],
-    seen_closed_position_ids: set[str],
-    writer: JsonlRunWriter,
-    run_id: str,
-    now_fn: Callable[[], datetime],
-) -> int:
-    """Write any newly-closed positions to JSONL. Returns count written."""
-    written = 0
-    for market in markets:
-        for preset in presets:
-            side = getattr(preset, "token_side", "yes")
-            instrument_id = InstrumentId.from_str(_build_instrument_id(market, side))
-            strategy_key = f"{market.slug}:{preset.name}"
-            strategy_id = strategy_ids_by_key.get(strategy_key)
-            if strategy_id is None:
-                continue
-            try:
-                closed_positions = list(node.cache.positions_closed(
-                    instrument_id=instrument_id,
-                    strategy_id=strategy_id,
-                ))
-            except Exception:
-                continue
-            for pos in closed_positions:
-                pid = str(getattr(pos, "id", id(pos)))
-                if pid in seen_closed_position_ids:
-                    continue
-                seen_closed_position_ids.add(pid)
-                # Determine exit reason: take_profit if positive P&L, else stop_loss
-                realized_pnl = float(pos.realized_pnl or 0)
-                exit_reason = "take_profit" if realized_pnl > 0 else "stop_loss"
-                writer.write({
-                    "run_id": run_id,
-                    "event": "position_exit",
-                    "asset_class": "weather",
-                    "weather_market_type": "daily_temperature",
-                    "preset_name": preset.name,
-                    "arena": preset.arena,
-                    "market_slug": market.slug,
-                    "city": market.city,
-                    "observation_date": str(market.observation_date),
-                    "instrument_id": str(instrument_id),
-                    "exit_reason": exit_reason,
-                    "realized_pnl": realized_pnl,
-                    "exit_time": _iso8601_from_unix_nanos(getattr(pos, "ts_closed", 0)),
-                    "timestamp": now_fn().isoformat(),
-                })
-                written += 1
-    return written
-
-
-# How long node.build() (which loads instruments via CLOB HTTP) is allowed to
-# block before we treat it as a hung session and retry.
-_NODE_BUILD_TIMEOUT_SECS = 180
-
-
-def _node_build_with_sigalrm(node: TradingNode) -> None:
-    """Call node.build() with a SIGALRM-based hard timeout.
-
-    node.build() makes synchronous HTTP calls to the Polymarket CLOB API
-    (instrument loading) and can hang indefinitely if the API is slow or
-    rate-limiting.  asyncio.wait_for() cannot interrupt it because it blocks
-    the event loop.  SIGALRM fires even when the event loop is blocked,
-    interrupting whatever blocking call is in-flight.
-    """
-
-    def _alarm_handler(signum: int, frame: object) -> None:  # noqa: ARG001
-        raise RecoverableDaemonError(
-            f"node.build() timed out after {_NODE_BUILD_TIMEOUT_SECS}s "
-            "(CLOB instrument loading hung)"
-        )
-
-    old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
-    signal.alarm(_NODE_BUILD_TIMEOUT_SECS)
-    try:
-        node.build()
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
-
-
-async def _node_stop_with_sigalrm(
-    node: TradingNode,
-    run_task: asyncio.Task,
-) -> None:
-    """Stop node.stop_async() with a SIGALRM-based hard timeout, then cancel run_task.
-
-    If node.stop_async() blocks the event loop indefinitely, SIGALRM will
-    fire and interrupt it. On any exception (including alarm), run_task is
-    cancelled and we continue — the node is going down anyway.
-    """
-    _NODE_STOP_TIMEOUT_SECS = 45
-
-    def _alarm_handler(signum: int, frame: object) -> None:  # noqa: ARG001
-        raise RecoverableDaemonError(
-            f"node.stop_async() timed out after {_NODE_STOP_TIMEOUT_SECS}s "
-            "(event loop blocked or stop hung)"
-        )
-
-    old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
-    signal.alarm(_NODE_STOP_TIMEOUT_SECS)
-    try:
-        await asyncio.wait_for(node.stop_async(), timeout=_NODE_STOP_TIMEOUT_SECS)
-    except (asyncio.TimeoutError, RecoverableDaemonError, Exception):
-        # Alarm fired, timeout fired, or stop_async raised. Either way, force cleanup.
-        _log.warning("node.stop_async() did not complete; cancelling run_task")
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
-        if not run_task.done():
-            run_task.cancel()
-
-
 def _already_entered_today(output_dir: Path, session_trading_day) -> set[str]:
     """Return market slugs that already have an open position entry for *session_trading_day*.
 
@@ -629,7 +229,12 @@ def _already_entered_today(output_dir: Path, session_trading_day) -> set[str]:
     if not runs_dir.exists():
         return slugs
     target_date_str = str(session_trading_day)
-    for jsonl_file in runs_dir.glob("*.jsonl"):
+    # Only scan live-trade files (weather_confirmed_live_* and weather_temp_live_*).
+    # Scanning paper-trade files (overnight_*, weather_temp_paper_*) would
+    # incorrectly block live entries just because a paper trade was logged.
+    live_file_patterns = ["weather_confirmed_live_*.jsonl", "weather_temp_live_*.jsonl"]
+    jsonl_files = [f for pat in live_file_patterns for f in runs_dir.glob(pat)]
+    for jsonl_file in jsonl_files:
         with jsonl_file.open() as fh:
             for line in fh:
                 try:
@@ -671,6 +276,39 @@ def _token_id_from_market(market: "DailyTemperatureMarket") -> str:
     return market.yes_token_id if hasattr(market, "yes_token_id") else ""
 
 
+# ---------------------------------------------------------------------------
+# CLOB market ruleset cache
+# ---------------------------------------------------------------------------
+_ruleset_cache: dict[str, dict[str, str]] = {}
+
+
+async def fetch_market_ruleset(condition_id: str) -> dict[str, str]:
+    """Fetch question + resolution description from CLOB for a condition_id.
+
+    Returns ``{"question": "...", "ruleset": "..."}`` or empty strings on failure.
+    Results are cached for the lifetime of the process (rulesets never change).
+    """
+    if condition_id in _ruleset_cache:
+        return _ruleset_cache[condition_id]
+
+    import httpx
+
+    clob_host = os.environ.get("POLYMARKET_CLOB_HOST", "https://clob.polymarket.com")
+    result = {"question": "", "ruleset": ""}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{clob_host}/markets/{condition_id}")
+        if r.status_code == 200:
+            data = r.json()
+            result["question"] = data.get("question", "")
+            result["ruleset"] = data.get("description", "")
+    except Exception as exc:
+        _log.debug("Ruleset fetch failed for %s: %s", condition_id[:16], exc)
+
+    _ruleset_cache[condition_id] = result
+    return result
+
+
 async def _run_direct_clob_entry_session(
     *,
     markets: list["DailyTemperatureMarket"],
@@ -699,7 +337,7 @@ async def _run_direct_clob_entry_session(
     from py_clob_client.clob_types import MarketOrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY
 
-    TARGET_USD = _Dec("2")
+    TARGET_USD = _Dec("1")
 
     # (token_side, token_id_attr, min_ask, max_ask, tp_price, sl_price, preset_name, arena)
     ENTRY_PASSES = [
@@ -718,6 +356,37 @@ async def _run_direct_clob_entry_session(
 
     # Track (slug, side) so a restart won't re-enter the same side twice.
     entered_this_session: set[tuple[str, str]] = set()
+
+    # --- Balance pre-check: cap budget_remaining to actual on-chain USDC balance ---
+    # The in-memory budget counter can exceed available funds when:
+    #   - Funds are locked in open positions (CLOB holds collateral)
+    #   - The daemon was restarted and the budget counter reset
+    #   - Other daemons placed orders from the same wallet
+    # Capping prevents submitting orders that produce PolyApiException "not enough balance".
+    try:
+        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+        _USDC_DEC = _Dec("1000000")
+        _ba_params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        _ba_result = await asyncio.to_thread(clob_client.get_balance_allowance, _ba_params)
+        if isinstance(_ba_result, dict):
+            _raw_bal = _ba_result.get("balance") or _ba_result.get("Balance") or 0
+            real_balance = _Dec(str(_raw_bal)) / _USDC_DEC
+            if real_balance < budget_remaining:
+                _log.info(
+                    "Balance pre-check: wallet=%.4f < budget_remaining=%.4f — "
+                    "capping budget_remaining to wallet balance",
+                    float(real_balance),
+                    float(budget_remaining),
+                )
+                budget_remaining = real_balance
+            else:
+                _log.debug(
+                    "Balance pre-check: wallet=%.4f >= budget_remaining=%.4f — OK",
+                    float(real_balance),
+                    float(budget_remaining),
+                )
+    except Exception as _bal_exc:
+        _log.warning("Could not fetch USDC balance from CLOB: %s", _bal_exc)
 
     async with _httpx.AsyncClient(timeout=10.0) as http:
         for (side, token_attr, min_ask, max_ask, tp_price, sl_price, preset_name, arena) in ENTRY_PASSES:
@@ -765,7 +434,25 @@ async def _run_direct_clob_entry_session(
                     _log.info("SKIP %s [%s]  mid=%.4f (outside [%.2f, %.2f])", slug, side, mid, min_ask, max_ask)
                     continue
 
-                # Shares to buy = $2 / mid, rounded down to 4dp
+                # Spread check: skip if bid-ask spread > 10% of mid
+                try:
+                    book_resp = await http.get(f"{clob_host}/book", params={"token_id": token_id})
+                    book_resp.raise_for_status()
+                    book_data = book_resp.json()
+                    b_bids = book_data.get("bids", [])
+                    b_asks = book_data.get("asks", [])
+                    if b_bids and b_asks:
+                        best_bid = float(b_bids[-1]["price"])
+                        best_ask = float(b_asks[0]["price"])
+                        spread = best_ask - best_bid
+                        if mid > 0 and spread / mid > 0.10:
+                            _log.info("SKIP %s [%s]  spread=%.4f (%.1f%% of mid) — too wide",
+                                     slug, side, spread, 100 * spread / mid)
+                            continue
+                except Exception:
+                    pass  # proceed with mid only if book unavailable
+
+                # Shares to buy = $1 / mid, rounded down to 4dp
                 raw_shares = TARGET_USD / _Dec(str(mid))
                 shares = raw_shares.quantize(_Dec("0.0001"))
                 stake = (shares * _Dec(str(mid))).quantize(_Dec("0.0001"))
@@ -777,17 +464,51 @@ async def _run_direct_clob_entry_session(
                 _log.info("ENTER %s [%s]  mid=%.4f  shares=%.4f  stake=%.4f", slug, side, mid, float(shares), float(stake))
 
                 try:
-                    order_args = MarketOrderArgs(token_id=token_id, amount=float(shares), side=BUY)
+                    # CRITICAL: MarketOrderArgs(amount=X, side=BUY) means "spend X USDC",
+                    # NOT "buy X shares". Pass stake (USD cost), not shares.
+                    # Passing shares here causes 1/mid overspend — at mid=0.025 that is
+                    # a 40× overrun (discovered 2026-04-22 via Shanghai $81 position).
+                    order_args = MarketOrderArgs(token_id=token_id, amount=float(stake), side=BUY)
                     signed_order = await asyncio.to_thread(clob_client.create_market_order, order_args)
                     resp_order = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
                     _log.info("ORDER resp: %s", resp_order)
                 except Exception as exc:
-                    _log.error("BUY FAILED for %s [%s]: %s", slug, side, exc)
+                    exc_str = str(exc)
+                    if "not enough balance" in exc_str or "balance is not enough" in exc_str:
+                        # Wallet lacks collateral. Stop all further order attempts this session
+                        # to avoid a cascade of failed orders burning API rate limits.
+                        _log.error(
+                            "BUY FAILED for %s [%s] — insufficient wallet balance: %s. "
+                            "Halting order submission for this session.",
+                            slug,
+                            side,
+                            exc,
+                        )
+                        budget_remaining = _Dec("0")
+                    else:
+                        _log.error("BUY FAILED for %s [%s]: %s", slug, side, exc)
                     continue
 
                 # Build instrument_id string matching the Nautilus convention: {cond_id}-{token_id}.POLYMARKET
                 cond_id = getattr(market, "condition_id", "") or ""
                 instrument_id_str = f"{cond_id}-{token_id}.POLYMARKET"
+
+                # Parse actual fill price from CLOB response
+                fill_price = mid
+                if resp_order and isinstance(resp_order, dict):
+                    taking = resp_order.get("takingAmount", "")
+                    making = resp_order.get("makingAmount", "")
+                    if taking and making:
+                        try:
+                            taking_f, making_f = float(taking), float(making)
+                            if taking_f > 0 and making_f > 0:
+                                fill_price = making_f / taking_f
+                                _log.info("Fill price: %.4f (mid was %.4f)", fill_price, mid)
+                        except (ValueError, TypeError, ZeroDivisionError):
+                            pass
+
+                # Fetch resolution ruleset from CLOB (cached after first call per condition_id)
+                ruleset_info = await fetch_market_ruleset(cond_id) if cond_id else {"question": "", "ruleset": ""}
 
                 writer.write({
                     "run_id": run_id,
@@ -806,6 +527,7 @@ async def _run_direct_clob_entry_session(
                     "token_side": side,
                     "instrument_id": instrument_id_str,
                     "entry_price": mid,
+                    "fill_price": fill_price,
                     "shares": float(shares),
                     "stake": float(stake),
                     "accounting_status": "open",
@@ -816,6 +538,8 @@ async def _run_direct_clob_entry_session(
                     "pnl": None,
                     "stop_loss_price": sl_price,
                     "take_profit_price": tp_price,
+                    "question": ruleset_info["question"],
+                    "ruleset": ruleset_info["ruleset"],
                     "timestamp": now_fn().isoformat(),
                     "clob_response": str(resp_order),
                 })
@@ -828,119 +552,6 @@ async def _run_direct_clob_entry_session(
     sleep_secs = max((session_end_time - now_fn()).total_seconds(), 0)
     _log.info("All entries done. Sleeping %.0fs until session boundary.", sleep_secs)
     await asyncio.sleep(sleep_secs)
-
-
-async def _run_continuous_session(
-    *,
-    markets: list[DailyTemperatureMarket],
-    monitoring_markets: list[DailyTemperatureMarket],
-    preset_set: str,
-    writer: JsonlRunWriter,
-    run_id: str,
-    now_fn: Callable[[], datetime],
-    session_end_time: datetime,
-    session_stake_cap: Decimal | None = None,
-) -> None:
-    """
-    Run the full Nautilus session — node construction, build, quote streaming,
-    and position flushing — directly on the main asyncio loop.
-
-    node.build() is a blocking synchronous call that installs signal handlers
-    (requiring the main thread) and connects to Polymarket's CLOB API.  We
-    cannot run it in a worker thread or subprocess.  Instead we use a
-    SIGALRM-based hard timeout (_node_build_with_sigalrm) that fires even
-    when the event loop is blocked, raising RecoverableDaemonError if the
-    CLOB API hangs longer than _NODE_BUILD_TIMEOUT_SECS.
-    """
-    node, presets, strategy_ids_by_key = _build_node_and_strategies(
-        markets=markets,
-        monitoring_markets=monitoring_markets,
-        preset_set=preset_set,
-        session_stake_cap=session_stake_cap,
-    )
-    seen_position_ids: set[str] = set()
-    seen_closed_position_ids: set[str] = set()
-
-    try:
-        _node_build_with_sigalrm(node)
-    except RecoverableDaemonError:
-        raise
-    except Exception as exc:
-        raise RecoverableDaemonError(f"node.build() failed: {exc}") from exc
-
-    run_task = asyncio.create_task(node.run_async())
-
-    # Compute session runtime and set SIGALRM. 420 = 300s instrument load + 120s stop buffer
-    session_runtime_secs = max((session_end_time - now_fn()).total_seconds(), 60.0)
-    _session_runtime_alarm_secs = int(session_runtime_secs + 420)
-
-    def _session_alarm_handler(signum: int, frame: object) -> None:
-        raise RecoverableDaemonError(
-            f"session timed out after {_session_runtime_alarm_secs}s "
-            "(node.run_async() blocked the event loop)"
-        )
-
-    old_session_handler = signal.signal(signal.SIGALRM, _session_alarm_handler)
-    signal.alarm(_session_runtime_alarm_secs)
-
-    try:
-        all_markets = list(markets) + list(monitoring_markets)
-        while now_fn() < session_end_time:
-            await asyncio.sleep(_POSITION_POLL_SECS)
-            _flush_new_positions(
-                node=node,
-                markets=all_markets,
-                presets=presets,
-                strategy_ids_by_key=strategy_ids_by_key,
-                seen_position_ids=seen_position_ids,
-                writer=writer,
-                run_id=run_id,
-                now_fn=now_fn,
-            )
-            _flush_closed_positions(
-                node=node,
-                markets=all_markets,
-                presets=presets,
-                strategy_ids_by_key=strategy_ids_by_key,
-                seen_closed_position_ids=seen_closed_position_ids,
-                writer=writer,
-                run_id=run_id,
-                now_fn=now_fn,
-            )
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_session_handler)
-        await _node_stop_with_sigalrm(node, run_task)
-        try:
-            await asyncio.wait_for(run_task, timeout=10.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-            pass
-        _flush_new_positions(
-            node=node,
-            markets=all_markets,
-            presets=presets,
-            strategy_ids_by_key=strategy_ids_by_key,
-            seen_position_ids=seen_position_ids,
-            writer=writer,
-            run_id=run_id,
-            now_fn=now_fn,
-        )
-        _flush_closed_positions(
-            node=node,
-            markets=all_markets,
-            presets=presets,
-            strategy_ids_by_key=strategy_ids_by_key,
-            seen_closed_position_ids=seen_closed_position_ids,
-            writer=writer,
-            run_id=run_id,
-            now_fn=now_fn,
-        )
-        try:
-            node.kernel.dispose()
-        except Exception:
-            pass
-        if node.kernel.executor:
-            node.kernel.executor.shutdown(wait=False, cancel_futures=True)
 
 
 async def _run_main_loop(
@@ -1045,6 +656,9 @@ async def _run_main_loop(
         # rolled to the next local calendar day but the session still belongs to the
         # previous trading day — which is also correct: those US markets have resolved.
         tradeable = [m for m in markets if m.observation_date == _city_local_date(m.city)]
+        # Skip lowest-temperature markets — daily-low fetcher does not exist; entering
+        # based on daily-high data produces incorrect signals (discovered 2026-04-22).
+        tradeable = [m for m in tradeable if getattr(m, "metric", "high") != "low"]
         already_entered = _already_entered_today(Path(output_dir), session_trading_day)
         if already_entered:
             _log.info("Skipping %d already-entered markets: %s", len(already_entered), already_entered)
@@ -1170,6 +784,12 @@ async def _run_main_loop(
 
 
 def main() -> int:
+    import logging as _logging
+    _logging.basicConfig(
+        level=_logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%SZ",
+    )
     parser = _build_parser()
     args = parser.parse_args()
     try:

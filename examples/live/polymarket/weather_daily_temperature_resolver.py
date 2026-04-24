@@ -375,6 +375,53 @@ async def _fetch_weather_events(
     return all_markets
 
 
+def filter_tradeable_daily_temperature_markets(
+    markets: list[DailyTemperatureMarket],
+    today: date,
+    max_markets: int | None = None,
+) -> list[DailyTemperatureMarket]:
+    """Filter near-term, tradeable temperature markets.
+
+    Keeps only today and tomorrow markets. Filters out 'exact' band types
+    (unsupported by ensemble forecaster) and returns all remaining markets
+    sorted by observation_date, band_type, and city.
+
+    Args:
+        markets: Raw discovered markets from resolver.
+        today: Reference date (typically date.today()).
+        max_markets: If set, cap result to this many markets (deprecated).
+                     Defaults to None (no cap). Use only for testing/debugging.
+    """
+    tomorrow = date(today.year, today.month, today.day) + __import__("datetime").timedelta(days=1)
+
+    # Keep only near-term markets (today and tomorrow)
+    near_term = [m for m in markets if m.observation_date in (today, tomorrow)]
+
+    # Filter out exact band types (unsupported by ensemble forecaster)
+    tradeable = [m for m in near_term if m.band_type != "exact"]
+
+    # Sort for consistency: date first, then band_type (or_higher > or_lower),
+    # then threshold (ascending), then city name for reproducibility
+    def band_type_priority(band_type: str) -> int:
+        if band_type == "or_higher":
+            return 0
+        elif band_type == "or_lower":
+            return 1
+        else:
+            return 2
+
+    sorted_markets = sorted(
+        tradeable,
+        key=lambda m: (m.observation_date, band_type_priority(m.band_type), m.threshold_f, m.city),
+    )
+
+    # Apply legacy max_markets cap if provided (for backward compat)
+    if max_markets is not None:
+        return sorted_markets[:max_markets]
+
+    return sorted_markets
+
+
 async def discover_daily_temperature_markets(
     *,
     http_client: Any,
@@ -423,3 +470,18 @@ async def discover_daily_temperature_markets(
                 results.append(parsed)
 
     return results
+
+
+# Alias for backward compatibility / expected daemon API
+async def resolve_daily_temperature_markets(
+    *,
+    http_client: Any,
+    gamma_base_url: str,
+    timeout_seconds: float = 15.0,
+) -> list[DailyTemperatureMarket]:
+    """Resolve (discover) daily temperature markets."""
+    return await discover_daily_temperature_markets(
+        http_client=http_client,
+        gamma_base_url=gamma_base_url,
+        timeout=timeout_seconds,
+    )

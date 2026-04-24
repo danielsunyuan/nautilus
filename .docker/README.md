@@ -210,6 +210,88 @@ The refresher defaults to every 60 seconds. Override it when starting Compose:
 REPORT_REFRESH_INTERVAL_SECONDS=30 docker compose -f .docker/docker-compose.yml up -d crypto-results-reporter
 ```
 
+## BTC Microstructure Paper Trading
+
+Isolated microstructure strategy family for BTC 5-minute markets. Uses external
+BTC candle data (RSI, momentum, VWAP, SMA crossover) plus Polymarket order book
+skew to generate trading signals.
+
+### One-Round Smoke Test
+
+```bash
+docker compose -f .docker/docker-compose.yml run --rm papertrade \
+  python examples/live/polymarket/polymarket_crypto_5m_microstructure_paper_daemon.py \
+    --preset-set microstructure_baseline \
+    --max-rounds 1 \
+    --output-dir /workspace/outputs
+```
+
+### Overnight Daemon
+
+```bash
+docker compose -f .docker/docker-compose.yml --profile vpn up -d \
+  btc-microstructure-daemon-vpn \
+  btc-microstructure-results-reporter
+```
+
+### Check Results
+
+```bash
+cat outputs/polymarket/reports/BTC_MICROSTRUCTURE_RESULTS.md
+```
+
+### View Logs
+
+```bash
+docker logs -f nautilus-btc-microstructure-daemon-vpn
+```
+
+## Weather Ensemble Paper Strategy
+
+Isolated forecast-driven paper strategy family for Polymarket daily temperature
+markets. Writes its own JSONL ledger and markdown report under the weather
+ensemble namespace.
+
+### One-Round Smoke Test
+
+```bash
+docker compose -f .docker/docker-compose.yml run --rm papertrade \
+  python /workspace/examples/live/polymarket/polymarket_weather_ensemble_paper_daemon.py \
+    --preset-set weather_ensemble_baseline \
+    --max-rounds 1 \
+    --output-dir /workspace/outputs
+```
+
+### Overnight Daemon
+
+```bash
+docker compose -f .docker/docker-compose.yml up -d weather-ensemble-daemon-vpn
+```
+
+### Settlement Poller
+
+```bash
+docker compose -f .docker/docker-compose.yml up -d weather-ensemble-settlement-vpn
+```
+
+### Refresh And Inspect Report
+
+```bash
+docker compose -f .docker/docker-compose.yml run --rm papertrade \
+  python /workspace/examples/live/polymarket/polymarket_weather_ensemble_reporting.py \
+    --report-root /workspace/outputs \
+    --report-md /workspace/WEATHER_ENSEMBLE_RESULTS.md
+
+docker compose -f .docker/docker-compose.yml exec workspace bash -lc 'ls -1t outputs/polymarket/weather_ensemble | head'
+docker compose -f .docker/docker-compose.yml exec workspace bash -lc 'sed -n "1,220p" WEATHER_ENSEMBLE_RESULTS.md'
+```
+
+Generated artifacts:
+
+- `outputs/polymarket/weather_ensemble/weather_ensemble_*.jsonl`
+- `outputs/polymarket/weather_ensemble/weather_ensemble_settlement.jsonl`
+- `WEATHER_ENSEMBLE_RESULTS.md`
+
 ## Postgres (local testing)
 
 Postgres integration tests run on Linux when a Postgres instance is available.

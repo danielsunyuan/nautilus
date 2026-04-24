@@ -191,9 +191,11 @@ _TWC_HIST_URL = (
     "?apiKey={key}&units={units}&startDate={date}&endDate={date}"
 )
 
-_WU_SCRAPE_URL = (
-    "https://www.wunderground.com/history/daily/us/new-york/KLGA/date/2026-4-22"
-)
+def _wu_scrape_url() -> str:
+    """Return the WU scrape URL using today's date (not a hardcoded date)."""
+    from datetime import date as _date
+    today = _date.today()
+    return f"https://www.wunderground.com/history/daily/us/new-york/KLGA/date/{today.year}-{today.month}-{today.day}"
 _TWC_KEY_RE = re.compile(r"apiKey[=:][\"'\s]*([a-f0-9]{32})")
 
 # Module-level mutable key cache so a refreshed key persists across calls
@@ -208,7 +210,7 @@ async def _scrape_fresh_twc_key() -> str | None:
             headers={"User-Agent": "Mozilla/5.0"},
             follow_redirects=True,
         ) as client:
-            r = await client.get(_WU_SCRAPE_URL)
+            r = await client.get(_wu_scrape_url())
         keys = _TWC_KEY_RE.findall(r.text)
         if keys:
             # Most frequent key is the active one
@@ -456,7 +458,12 @@ async def fetch_daily_high(
         if cached is not None:
             return cached
 
-    key = api_key or _active_twc_key or os.environ.get("TWC_API_KEY", _DEFAULT_TWC_KEY)
+    key = api_key or _active_twc_key or os.environ.get("TWC_API_KEY") or _DEFAULT_TWC_KEY
+    if key == _DEFAULT_TWC_KEY and not os.environ.get("TWC_API_KEY"):
+        log.warning(
+            "Using embedded TWC fallback key — set TWC_API_KEY env var with a fresh key "
+            "extracted from wunderground.com if fetches start returning 401."
+        )
     station, iso, unit, oracle_type = CITY_STATIONS[city]
 
     obs: StationObs | None = None

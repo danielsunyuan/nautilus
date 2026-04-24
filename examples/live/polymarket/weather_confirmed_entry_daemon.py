@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import UTC
+from datetime import date
 from datetime import datetime
 from decimal import Decimal
 import json
@@ -44,6 +45,7 @@ from examples.live.polymarket.polymarket_weather_daily_temperature_live_daemon i
     _city_local_date,
     _ensure_clob_credentials,
     _backoff_delay,
+    fetch_market_ruleset,
     SESSION_END_HOUR_UTC,
     _CITY_TIMEZONES,
 )
@@ -69,7 +71,46 @@ from examples.live.polymarket.weather_wunderground_fetcher import (
 _log = __import__("logging").getLogger(__name__)
 
 # Per-trade target USD
-TARGET_USD = Decimal("2")
+TARGET_USD = Decimal("1")
+
+# USDC has 6 decimal places on-chain: 1_000_000 units = $1.00
+_USDC_DECIMALS = Decimal("1000000")
+
+
+async def _fetch_usdc_balance(clob_client) -> Decimal | None:
+    """Fetch the real on-chain USDC balance from the CLOB.
+
+    Returns the balance in USD (e.g. Decimal('91.855239') for 91855239 on-chain units),
+    or None if the fetch fails so the caller can decide whether to skip the guard.
+
+    The CLOB balance endpoint returns raw integer units with 6 decimal places
+    (USDC standard). Dividing by 1_000_000 converts to dollar-denominated Decimal.
+    """
+    from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+
+    try:
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        result = await asyncio.to_thread(clob_client.get_balance_allowance, params)
+        if isinstance(result, dict):
+            raw = result.get("balance") or result.get("Balance") or 0
+            return Decimal(str(raw)) / _USDC_DECIMALS
+    except Exception as exc:
+        _log.warning("Could not fetch USDC balance from CLOB: %s", exc)
+    return None
+
+
+def _city_target_date(city: str, now: datetime) -> date:
+    """Return the current local calendar date for a city at *now*."""
+    import zoneinfo
+
+    tz_name = _CITY_TIMEZONES.get(city)
+    if tz_name is None:
+        return now.date()
+    try:
+        tz = zoneinfo.ZoneInfo(tz_name)
+    except Exception:
+        return now.date()
+    return now.astimezone(tz).date()
 
 
 def clob_best_bid_ask(order_book) -> tuple[float | None, float | None]:
@@ -129,9 +170,12 @@ def _build_confirmed_entry_event(
     clob_response,
     now: datetime,
     dry_run: bool = False,
+    ruleset_info: dict[str, str] | None = None,
+    fill_price: float | None = None,
 ) -> dict:
     """Build JSONL event dict for confirmed entry."""
     ts = now.isoformat()
+    ri = ruleset_info or {"question": "", "ruleset": ""}
     return {
         "run_id": run_id,
         "event": "strategy_result",
@@ -149,6 +193,7 @@ def _build_confirmed_entry_event(
         "token_side": signal.token_side,
         "instrument_id": f"{market.condition_id}-{signal.token_id}.POLYMARKET",
         "entry_price": mid,
+        "fill_price": fill_price if fill_price is not None else mid,
         "shares": float(shares),
         "stake": float(stake),
         "accounting_status": "open",
@@ -162,6 +207,8 @@ def _build_confirmed_entry_event(
         "strategy_type": signal.strategy,
         "wu_daily_max": signal.wu_daily_max,
         "wu_as_of_utc": signal.wu_as_of_utc,
+        "question": ri["question"],
+        "ruleset": ri["ruleset"],
         "timestamp": ts,
         "clob_response": str(clob_response),
         "real_order": not dry_run,  # True for live CLOB fills; False in dry-run mode
@@ -205,6 +252,31 @@ async def _run_poll_cycle(
         next_poll_secs = _next_poll_secs(markets, latest_obs)
         return budget_remaining, next_poll_secs
 
+    # --- Balance pre-check: cap budget_remaining to actual on-chain USDC balance ---
+    # The in-memory budget counter can drift from the real wallet balance when:
+    #   - Orders were placed by other daemons or sessions
+    #   - Funds are locked in open positions (CLOB holds collateral)
+    #   - The daemon was restarted and the budget counter reset
+    # Fetching the real balance once per poll cycle prevents submitting orders
+    # that exceed available funds (PolyApiException "not enough balance").
+    if not dry_run:
+        real_balance = await _fetch_usdc_balance(clob_client)
+        if real_balance is not None:
+            if real_balance < budget_remaining:
+                _log.info(
+                    "Balance pre-check: wallet=%.4f < budget_remaining=%.4f — "
+                    "capping budget_remaining to wallet balance",
+                    float(real_balance),
+                    float(budget_remaining),
+                )
+                budget_remaining = real_balance
+            else:
+                _log.debug(
+                    "Balance pre-check: wallet=%.4f >= budget_remaining=%.4f — OK",
+                    float(real_balance),
+                    float(budget_remaining),
+                )
+
     # --- Phase 1: Pre-fetch observations — one fetch per unique city ---
     unique_cities = {m.city for m in markets}
     # Snapshot prev daily_max values before updating latest_obs this cycle
@@ -217,8 +289,9 @@ async def _run_poll_cycle(
     # stale cached observations from advancing ConfirmTracker counts.
     cities_with_fresh_obs: set[str] = set()
     for city in unique_cities:
+        target_date = _city_target_date(city, now_fn())
         try:
-            obs = await fetch_daily_high(city)
+            obs = await fetch_daily_high(city, target_date=target_date)
         except Exception as exc:
             _log.warning("fetch_daily_high failed for %s: %s", city, exc)
             continue
@@ -265,6 +338,16 @@ async def _run_poll_cycle(
                 _log.debug(
                     "SKIP %s  no fresh obs for %s this cycle (stale-fetch guard)",
                     market.slug, city,
+                )
+                continue
+
+            # Skip lowest-temperature markets — our fetcher only tracks the daily HIGH.
+            # Entering a "low" metric market based on daily-high data produces a wrong
+            # signal (e.g. high=18°C passes the 14°C NO gate but low=14°C resolves YES).
+            if getattr(market, "metric", "high") == "low":
+                _log.warning(
+                    "SKIP %s  metric=low not supported (daily-high fetcher only)",
+                    market.slug,
                 )
                 continue
 
@@ -359,6 +442,35 @@ async def _run_poll_cycle(
                          market.slug, signal.token_side, mid, signal.max_entry_price)
                 continue
 
+            # Fix 1: Skip if price too cheap (cheap bucket trap — thin liquidity, high slippage)
+            from examples.live.polymarket.weather_confirmed_signal import MIN_ENTRY_PRICE
+            min_price = MIN_ENTRY_PRICE.get(signal.strategy, 0.80)
+            if mid < min_price:
+                _log.info("SKIP %s [%s]  mid=%.4f < min=%.2f (cheap bucket trap)",
+                         market.slug, signal.token_side, mid, min_price)
+                continue
+
+            # Fix 2: Skip if bid-ask spread is too wide (can't exit without significant loss)
+            try:
+                book_resp = await http.get(
+                    f"{clob_host}/book",
+                    params={"token_id": signal.token_id},
+                )
+                book_resp.raise_for_status()
+                book = book_resp.json()
+                bids = book.get("bids", [])
+                asks = book.get("asks", [])
+                if bids and asks:
+                    best_bid = float(bids[-1]["price"])  # bids ascending, best = last
+                    best_ask = float(asks[0]["price"])   # asks ascending, best = first
+                    spread = best_ask - best_bid
+                    if mid > 0 and spread / mid > 0.10:
+                        _log.info("SKIP %s [%s]  spread=%.4f (%.1f%% of mid) — too wide",
+                                 market.slug, signal.token_side, spread, 100 * spread / mid)
+                        continue
+            except Exception as exc:
+                _log.debug("Book fetch failed for %s: %s (proceeding with mid only)", market.slug, exc)
+
             # Compute shares and stake
             raw_shares = TARGET_USD / Decimal(str(mid))
             shares = raw_shares.quantize(Decimal("0.0001"))
@@ -383,9 +495,13 @@ async def _run_poll_cycle(
             clob_response = None
             if not dry_run:
                 try:
+                    # CRITICAL: MarketOrderArgs(amount=X, side=BUY) means "spend X USDC",
+                    # NOT "buy X shares". Pass stake (USD cost), not shares.
+                    # Passing shares here causes 1/mid overspend — at mid=0.025 that is
+                    # a 40× overrun (discovered 2026-04-22 via Shanghai $81 position).
                     order_args = MarketOrderArgs(
                         token_id=signal.token_id,
-                        amount=float(shares),
+                        amount=float(stake),
                         side=BUY,
                     )
                     signed_order = await asyncio.to_thread(
@@ -399,7 +515,25 @@ async def _run_poll_cycle(
                     )
                     _log.info("ORDER resp: %s", clob_response)
                 except Exception as exc:
-                    _log.error("BUY FAILED for %s [%s]: %s", market.slug, signal.token_side, exc)
+                    exc_str = str(exc)
+                    if "not enough balance" in exc_str or "balance is not enough" in exc_str:
+                        # The wallet lacks the collateral to fill this order.
+                        # This can happen when:
+                        #   - Funds are locked in existing open positions
+                        #   - The balance pre-check raced against another order submission
+                        #   - The real_balance fetch failed and we skipped the cap
+                        # Stop trying more orders this cycle — the remaining markets
+                        # would fail the same way.
+                        _log.error(
+                            "BUY FAILED for %s [%s] — insufficient wallet balance: %s. "
+                            "Halting order submission for this poll cycle.",
+                            market.slug,
+                            signal.token_side,
+                            exc,
+                        )
+                        budget_remaining = Decimal("0")
+                    else:
+                        _log.error("BUY FAILED for %s [%s]: %s", market.slug, signal.token_side, exc)
                     continue
 
             # A1 ladder: latch city only after all gating checks pass and order
@@ -407,6 +541,28 @@ async def _run_poll_cycle(
             # fails quote/price/budget gating from suppressing eligible lower rungs.
             if signal.strategy == "A1":
                 city_a1_entered.add(city)
+
+            # Fix 3: Parse actual fill price from CLOB response
+            # The CLOB returns takingAmount/makingAmount when filled.
+            # actual_fill_price = makingAmount / takingAmount (USDC spent / shares received)
+            fill_price = mid  # fallback to mid if fill data unavailable
+            if clob_response and isinstance(clob_response, dict):
+                taking = clob_response.get("takingAmount", "")
+                making = clob_response.get("makingAmount", "")
+                if taking and making:
+                    try:
+                        taking_f = float(taking)
+                        making_f = float(making)
+                        if taking_f > 0 and making_f > 0:
+                            # For BUY: takingAmount = shares received, makingAmount = USDC spent
+                            fill_price = making_f / taking_f
+                            _log.info("Fill price: %.4f (mid was %.4f, delta=%.4f)",
+                                     fill_price, mid, fill_price - mid)
+                    except (ValueError, TypeError, ZeroDivisionError):
+                        pass
+
+            # Fetch resolution ruleset from CLOB (cached per condition_id)
+            ruleset_info = await fetch_market_ruleset(market.condition_id) if market.condition_id else None
 
             # Write event
             writer.write(
@@ -420,6 +576,8 @@ async def _run_poll_cycle(
                     clob_response=clob_response,
                     now=now_fn(),
                     dry_run=dry_run,
+                    ruleset_info=ruleset_info,
+                    fill_price=fill_price,
                 )
             )
 
@@ -453,12 +611,26 @@ async def _run_main_loop(
     confirm_tracker = ConfirmTracker()
     latest_obs: dict[str, StationObs] = {}
     entered_this_session: set[tuple[str, str]] = set()
+    _last_session_day = None
     rounds = 0
 
     while max_rounds <= 0 or rounds < max_rounds:
         run_id = uuid.uuid4().hex
         started_at = now_fn()
         session_trading_day = _session_trading_day(started_at)
+
+        # Reset in-memory session state when the trading day rolls over.
+        # Without this, entered_this_session and confirm_tracker grow indefinitely
+        # and entries are incorrectly blocked on the new trading day.
+        if _last_session_day is not None and session_trading_day != _last_session_day:
+            _log.info(
+                "Session rolled %s → %s — resetting entered_this_session and confirm_tracker",
+                _last_session_day,
+                session_trading_day,
+            )
+            entered_this_session = set()
+            confirm_tracker = ConfirmTracker()
+        _last_session_day = session_trading_day
 
         # Resolve markets
         try:

@@ -208,7 +208,7 @@ services:
       - --preset-set
       - ${POLYMARKET_CRYPTO_5M_PRESET_SET:-research}
       - --max-rounds
-      - ${POLYMARKET_CRYPTO_5M_MAX_ROUNDS:-0}
+      - ${POLYMARKET_CRYPTO_5M_MAX_ROUNDS:-1}
       - --execution-cutoff-seconds
       - ${POLYMARKET_CRYPTO_5M_EXECUTION_CUTOFF_SECONDS:-15}
     init: true
@@ -1035,6 +1035,145 @@ services:
     restart: unless-stopped
     networks:
       - nautilus-network
+
+  # ---- Research: user tracker (records competitor positions/trades) ----
+  user-tracker-vpn:
+    container_name: nautilus-user-tracker-vpn
+    profiles: ["vpn", "research"]
+    image: nautilus-recorder:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      TRACKER_OUTPUT_DIR: /workspace/nautilus/outputs/polymarket/user_tracking
+      TRACKER_POLL_INTERVAL: "${TRACKER_POLL_INTERVAL:-1800}"
+    volumes:
+      - ..:/workspace/nautilus
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    command:
+      - python
+      - /workspace/nautilus/scripts/polymarket_user_tracker.py
+      - --loop
+
+  weather-ensemble-daemon-vpn:
+    container_name: nautilus-weather-ensemble-daemon-vpn
+    profiles: ["vpn"]
+    image: nautilus-papertrade:latest
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/polymarket/polymarket_weather_ensemble_paper_daemon.py
+      - --preset-set
+      - ${POLYMARKET_WEATHER_ENSEMBLE_PRESET_SET:-weather_ensemble_baseline}
+      - --max-rounds
+      - ${POLYMARKET_WEATHER_ENSEMBLE_MAX_ROUNDS:-0}
+      - --poll-interval
+      - "300"
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+      - ../.env.polymarket
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_VPN_CACHE_HOST:-172.22.0.3}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
+      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
+      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
+    volumes:
+      - ..:/workspace
+      - ../outputs:/workspace/outputs
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  weather-ensemble-settlement-vpn:
+    container_name: nautilus-weather-ensemble-settlement-vpn
+    profiles: ["vpn"]
+    image: nautilus-papertrade:latest
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/polymarket/weather_ensemble_settlement.py
+      - --output-dir
+      - /workspace/outputs
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+      - ../.env.polymarket
+    environment:
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
+      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
+      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
+    volumes:
+      - ..:/workspace
+      - ../outputs:/workspace/outputs
+    network_mode: "service:nordvpn"
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  weather-ensemble-results-reporter:
+    container_name: nautilus-weather-ensemble-results-reporter
+    image: nautilus-papertrade:latest
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - sh
+      - -lc
+      - |
+        while true; do
+          python /workspace/examples/live/polymarket/polymarket_weather_ensemble_reporting.py --report-root /workspace/outputs || true
+          sleep "$${REPORT_REFRESH_INTERVAL_SECONDS:-60}"
+        done
+    init: true
+    tty: true
+    stdin_open: true
+    environment:
+      REPORT_REFRESH_INTERVAL_SECONDS: ${REPORT_REFRESH_INTERVAL_SECONDS:-60}
+    volumes:
+      - ..:/workspace:ro
+      - ../outputs:/workspace/outputs
+    networks:
+      - nautilus-network
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
 
 networks:
   nautilus-network:

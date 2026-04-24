@@ -217,6 +217,53 @@ def test_compute_settlement_unresolved_returns_none():
     assert result is None
 
 
+def test_make_entry_id_parity_between_strategy_result_and_settlement_update(tmp_path: Path):
+    """make_entry_id must produce the same key for a strategy_result row and its
+    corresponding settlement_update row so that merge_entries_with_settlements can
+    join them correctly."""
+    report_mod = _load_module(
+        "weather_daily_temperature_report",
+        ROOT / "examples" / "live" / "polymarket" / "weather_daily_temperature_report.py",
+    )
+    make_entry_id = report_mod.make_entry_id
+
+    # Build a strategy_result row with a known timestamp (used as entry_time fallback)
+    strategy_result_row = _make_strategy_result(
+        market_slug="nyc-high-temp-70-2026-04-20",
+        condition_id=_FAKE_CONDITION_ID,
+        token_id=_FAKE_TOKEN_ID,
+        token_side="yes",
+        run_id="run-parity-001",
+    )
+    strategy_result_row = dict(strategy_result_row)
+    strategy_result_row["timestamp"] = "2026-04-20T08:00:00+00:00"
+
+    # Write the row to a JSONL file and scan for unresolved entries
+    _write_jsonl(tmp_path / "weather_temp_live_parity.jsonl", [strategy_result_row])
+    entries = mod.scan_unresolved_entries(tmp_path)
+    assert len(entries) == 1, "Expected exactly one unresolved entry"
+    entry = entries[0]
+    assert entry.entry_time == "2026-04-20T08:00:00+00:00", (
+        f"entry_time not captured: got {entry.entry_time!r}"
+    )
+
+    # Compute a settlement from that entry
+    resolution = mod.MarketResolution(token_id=_FAKE_TOKEN_ID, resolved=True, settlement_price=1.0)
+    settlement_dict = compute_settlement(entry, resolution)
+    assert settlement_dict is not None
+    assert settlement_dict.get("entry_time") == "2026-04-20T08:00:00+00:00", (
+        f"entry_time missing from settlement_update dict: {settlement_dict}"
+    )
+
+    # The keys produced by make_entry_id must match
+    entry_key = make_entry_id(strategy_result_row)
+    settlement_key = make_entry_id(settlement_dict)
+    assert entry_key == settlement_key, (
+        f"Key mismatch: strategy_result key={entry_key!r} vs "
+        f"settlement_update key={settlement_key!r}"
+    )
+
+
 def test_settlement_loop_processes_and_exits(tmp_path: Path):
     """Loop resolves one market, writes settlement_update, exits after max_iterations=1."""
     rows = [

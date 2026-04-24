@@ -36,7 +36,7 @@ class SportsStrategyPreset:
     max_ask: float
     max_spread: float = 0.02       # sports markets are liquid; tight spread required
     min_ask_size: float = 50.0     # require decent liquidity
-    order_qty: float = 10.0
+    order_qty: float = 5.0
     mode: str = "band_only"        # "band_only" or "basic"
     allowed_sports: frozenset[str] | None = None        # None = all sports
     allowed_market_types: frozenset[str] | None = None  # None = all market types
@@ -45,6 +45,8 @@ class SportsStrategyPreset:
     min_clv_edge: float | None = None  # None = no CLV gate; 0.05 = require 5pp Polymarket discount vs Vegas
     kelly_edge_estimate: float | None = None  # None = flat sizing; estimated edge fraction for Kelly
     kelly_max_fraction: float = 0.25  # quarter-Kelly cap (overrideable per preset)
+    allowed_days_of_week: frozenset[int] | None = None  # 0=Mon, 6=Sun; None = all days
+    blocked_utc_hours: frozenset[int] | None = None  # UTC hours to skip; None = no block
 
 
 def band_only_presets() -> tuple[SportsStrategyPreset, ...]:
@@ -61,14 +63,14 @@ def band_only_presets() -> tuple[SportsStrategyPreset, ...]:
             name="sports_60c_band_only",
             arena="sports_60c",
             min_ask=0.60,
-            max_ask=0.70,
+            max_ask=0.65,
             mode="band_only",
         ),
         SportsStrategyPreset(
             name="sports_70c_band_only",
             arena="sports_70c",
             min_ask=0.70,
-            max_ask=0.80,
+            max_ask=0.75,
             mode="band_only",
         ),
         SportsStrategyPreset(
@@ -102,14 +104,14 @@ def basic_presets() -> tuple[SportsStrategyPreset, ...]:
             name="sports_60c_basic",
             arena="sports_60c",
             min_ask=0.60,
-            max_ask=0.70,
+            max_ask=0.65,
             mode="basic",
         ),
         SportsStrategyPreset(
             name="sports_70c_basic",
             arena="sports_70c",
             min_ask=0.70,
-            max_ask=0.80,
+            max_ask=0.75,
             mode="basic",
         ),
         SportsStrategyPreset(
@@ -142,14 +144,18 @@ def focused_presets() -> tuple[SportsStrategyPreset, ...]:
     - Tennis: all market types (WR 77.6%, +5.1pp edge, n=326)
     - UFC: all market types (WR 90.2%, +13.2pp edge, n=41)
     - NBA: totals only (WR 80%, +28.7pp edge, n=20) — spreads bleed at -20pp
-    - MLB, hockey: excluded entirely (both negative across all arenas)
+    - MLB, hockey: excluded entirely (MLB: -22.3pp edge, both negative across all arenas)
+
+    Band narrowing (Apr 2026 deep analysis of 5,314 resolved trades):
+    - 60c band: lower half only (0.60-0.65, not 0.60-0.70); lower half ROI +14.0% vs upper -1.3%
+    - 70c band: lower half only (0.70-0.75, not 0.70-0.80); lower half ROI +12.5% vs upper +3.7%
 
     Re-run baseline analysis before modifying these whitelists.
     """
     arenas = [
         ("sports_50c", 0.50, 0.60),
-        ("sports_60c", 0.60, 0.70),
-        ("sports_70c", 0.70, 0.80),
+        ("sports_60c", 0.60, 0.65),
+        ("sports_70c", 0.70, 0.75),
         ("sports_80c", 0.80, 0.90),
         ("sports_90c", 0.90, 0.981),
     ]
@@ -164,6 +170,7 @@ def focused_presets() -> tuple[SportsStrategyPreset, ...]:
             mode="basic",
             allowed_sports=frozenset({"tennis", "ufc"}),
             allowed_market_types=None,
+            blocked_utc_hours=frozenset({18, 19}),
         ))
         # NBA: totals only
         presets.append(SportsStrategyPreset(
@@ -174,6 +181,7 @@ def focused_presets() -> tuple[SportsStrategyPreset, ...]:
             mode="basic",
             allowed_sports=frozenset({"nba"}),
             allowed_market_types=frozenset({"totals"}),
+            blocked_utc_hours=frozenset({18, 19}),
         ))
     return tuple(presets)
 
@@ -215,6 +223,22 @@ def clv_focused_presets() -> tuple[SportsStrategyPreset, ...]:
             min_clv_edge=0.05,
         )
         for p in focused_presets()
+    )
+
+
+def ufc_favorite_fixed_presets() -> tuple[SportsStrategyPreset, ...]:
+    """Return a single UFC-only fixed-share favorite-side baseline preset."""
+    return (
+        SportsStrategyPreset(
+            name="ufc_favorite_fixed_shares",
+            arena="ufc_favorite_fixed",
+            min_ask=0.50,
+            max_ask=0.981,
+            order_qty=10.0,
+            mode="band_only",
+            allowed_sports=frozenset({"ufc"}),
+            allowed_market_types=None,
+        ),
     )
 
 
@@ -281,6 +305,7 @@ def should_enter_sports_market(
     if preset.allowed_market_types is not None and market_type not in preset.allowed_market_types:
         return False
     # Time-to-game gate
+    game_dt: datetime | None = None
     if preset.max_hours_before_game is not None and game_time:
         try:
             game_dt = datetime.fromisoformat(game_time.replace("Z", "+00:00"))
@@ -291,6 +316,24 @@ def should_enter_sports_market(
                 return False
         except (ValueError, TypeError):
             pass  # unparseable game_time — don't block
+    elif game_time:
+        # Parse game_dt for day-of-week and UTC hour gates even if max_hours_before_game is None
+        try:
+            game_dt = datetime.fromisoformat(game_time.replace("Z", "+00:00"))
+            if game_dt.tzinfo is None:
+                game_dt = game_dt.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            pass
+
+    # Day-of-week gate
+    if preset.allowed_days_of_week is not None and game_dt is not None:
+        if game_dt.weekday() not in preset.allowed_days_of_week:
+            return False
+
+    # UTC hour block
+    if preset.blocked_utc_hours is not None and game_dt is not None:
+        if game_dt.hour in preset.blocked_utc_hours:
+            return False
 
     # CLV gate (after time gate, before price band)
     if preset.min_clv_edge is not None:

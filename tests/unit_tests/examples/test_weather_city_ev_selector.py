@@ -417,17 +417,16 @@ class TestSelectBestCityCandidates:
         assert results[0].selected is True
 
     def test_mixed_yes_no_tokens_best_ev_wins(self):
-        """YES and NO tokens in same group compete on EV."""
-        # YES: mid=0.30, prob=0.35 → EV = 0.05
+        """YES and NO tokens in same group compete on EV; higher EV wins."""
+        # YES: mid=0.30, prob=0.36 → EV = 0.06
         yes_c = _make(
             market_slug="nyc-70f-yes",
             token_side="yes",
             threshold_f=70.0,
             mid=0.30,
-            estimated_prob=0.35,
+            estimated_prob=0.36,
         )
-        # NO (same threshold, same market): mid=0.70, prob=0.75 → EV = 0.05
-        # Equal EV → tie-break on threshold_f → both have same threshold, pick first
+        # NO (same threshold): mid=0.70, prob=0.75 → EV = 0.05
         no_c = _make(
             market_slug="nyc-70f-no",
             token_side="no",
@@ -438,3 +437,38 @@ class TestSelectBestCityCandidates:
         results = select_best_city_candidates([yes_c, no_c])
         selected = [r for r in results if r.selected]
         assert len(selected) == 1
+        assert selected[0].candidate.token_side == "yes"
+        assert selected[0].candidate.market_slug == "nyc-70f-yes"
+
+    def test_mixed_yes_no_tie_break_yes_wins(self):
+        """Equal EV, equal threshold_f → YES wins tie-break over NO (lexicographic)."""
+        # Use identical mid/prob so EV is bit-for-bit equal.
+        # YES: mid=0.50, prob=0.60 → EV = 0.10
+        yes_c = _make(
+            market_slug="nyc-70f-yes",
+            token_side="yes",
+            threshold_f=70.0,
+            mid=0.50,
+            estimated_prob=0.60,
+        )
+        # NO: same numbers → EV = 0.10 (exactly equal)
+        no_c = _make(
+            market_slug="nyc-70f-no",
+            token_side="no",
+            threshold_f=70.0,
+            mid=0.50,
+            estimated_prob=0.60,
+        )
+        assert math.isclose(ev(yes_c), ev(no_c), abs_tol=1e-12)
+        results = select_best_city_candidates([yes_c, no_c])
+        by_slug = {r.candidate.market_slug: r for r in results}
+        assert by_slug["nyc-70f-yes"].selected is True
+        assert by_slug["nyc-70f-yes"].reason == "selected"
+        assert by_slug["nyc-70f-no"].selected is False
+        assert by_slug["nyc-70f-no"].reason == "tie_break_loss"
+
+    def test_duplicate_instance_raises(self):
+        """Passing the same CandidateSignal instance twice raises ValueError."""
+        c = _make()
+        with pytest.raises(ValueError, match="Duplicate CandidateSignal"):
+            select_best_city_candidates([c, c])

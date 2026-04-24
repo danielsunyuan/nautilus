@@ -54,6 +54,9 @@ SPORTS_MARKET_TYPES = {
     "ufc_go_the_distance",
 }
 
+# UFC-specific market types must only appear for UFC
+_UFC_ONLY_MARKET_TYPES = frozenset({"ufc_method_of_victory", "ufc_go_the_distance"})
+
 
 def _parse_outcome_prices(prices_str: str | list) -> list[float] | None:
     """Parse outcome prices from JSON string or list."""
@@ -144,6 +147,10 @@ def parse_sports_market(
     if market_type not in SPORTS_MARKET_TYPES:
         return []
 
+    # Cross-validate: UFC-specific market types must only appear for UFC
+    if market_type in _UFC_ONLY_MARKET_TYPES and sport_tag != "ufc":
+        return []
+
     # Extract question/title
     question = gamma_market.get("question", "").strip()
     match_title = gamma_market.get("title", question).strip()
@@ -192,6 +199,7 @@ def parse_sports_market(
                 game_time=game_time,
                 active=active,
                 accepting_orders=accepting_orders,
+                current_price=price,
             ),
         )
 

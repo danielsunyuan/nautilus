@@ -57,3 +57,35 @@ class SportsMarket:
     game_time: str               # ISO string from endDate, or ""
     active: bool
     accepting_orders: bool
+    current_price: float | None = None
+
+
+def select_highest_price_outcome_per_condition(
+    markets: list[SportsMarket],
+) -> list[SportsMarket]:
+    """Keep one deterministic highest-priced outcome per condition_id."""
+    best_by_condition: dict[str, SportsMarket] = {}
+    condition_order: list[str] = []
+
+    for market in markets:
+        condition_id = market.condition_id
+        if condition_id not in best_by_condition:
+            best_by_condition[condition_id] = market
+            condition_order.append(condition_id)
+            continue
+
+        incumbent = best_by_condition[condition_id]
+        incumbent_price = -1.0 if incumbent.current_price is None else float(incumbent.current_price)
+        candidate_price = -1.0 if market.current_price is None else float(market.current_price)
+
+        if candidate_price > incumbent_price:
+            best_by_condition[condition_id] = market
+            continue
+
+        if candidate_price == incumbent_price:
+            candidate_key = (market.token_id, market.outcome_name.casefold())
+            incumbent_key = (incumbent.token_id, incumbent.outcome_name.casefold())
+            if candidate_key < incumbent_key:
+                best_by_condition[condition_id] = market
+
+    return [best_by_condition[condition_id] for condition_id in condition_order]

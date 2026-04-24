@@ -96,6 +96,7 @@ class UnresolvedEntry:
     observation_date: str
     source_file: str  # which JSONL file it came from
     real_order: bool = False  # True only for confirmed-entry daemon (real CLOB fills)
+    entry_time: str = ""  # ISO timestamp from entry row; used by make_entry_id for key parity
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,8 +118,9 @@ class JsonlRunWriter:
 
     def write(self, payload: dict[str, Any]) -> None:
         with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True))
-            handle.write("\n")
+            # Single write call: crash between two separate write() calls would
+            # produce a partial line with no newline — silently dropped by readers.
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
             handle.flush()
 
 
@@ -259,6 +261,7 @@ def scan_unresolved_entries(jsonl_dir: Path) -> list[UnresolvedEntry]:
                 observation_date=row.get("observation_date", ""),
                 source_file=fname,
                 real_order=is_real,
+                entry_time=row.get("entry_time", row.get("timestamp", "")),
             )
         )
     return entries
@@ -302,6 +305,7 @@ def compute_settlement(
         "observation_date": entry.observation_date,
         "token_side": entry.token_side,
         "entry_price": entry.entry_price,
+        "entry_time": entry.entry_time,
         "settlement_price": settlement_price,
         "shares": entry.shares,
         "stake": entry.stake,

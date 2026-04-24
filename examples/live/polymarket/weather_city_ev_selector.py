@@ -18,7 +18,6 @@ calibration pipeline would need to produce.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import groupby
 from operator import attrgetter
 
 
@@ -62,7 +61,7 @@ class CandidateSignal:
     threshold_f: float  # may be °C for non-US cities
     mid: float  # current CLOB mid-price (0–1)
     estimated_prob: float  # calibrated probability of winning (0–1)
-    fee_rate: float = 0.0  # Polymarket fee fraction (default 0)
+    fee_rate: float = 0.0  # Default 0 — fees excluded; callers should supply the actual Polymarket fee rate (~0.02) in production for accurate EV.
     slippage: float = 0.0  # expected slippage fraction
 
 
@@ -141,7 +140,8 @@ def select_best_city_candidates(
     3. If the highest EV <= 0, reject all with reason "negative_ev".
     4. Otherwise select the candidate with the highest EV.
     5. Tie-break: when two candidates have EV within 1e-9 of each other,
-       prefer the lower threshold_f (more conservative entry). The loser
+       prefer the lower threshold_f (more conservative entry); secondary
+       key is token_side ("yes" < "no" lexicographically). The loser
        receives reason "tie_break_loss".
     6. All non-selected candidates with positive EV receive reason "lower_ev".
 
@@ -162,6 +162,9 @@ def select_best_city_candidates(
     if not candidates:
         return []
 
+    if len(candidates) != len(set(id(c) for c in candidates)):
+        raise ValueError("Duplicate CandidateSignal instances in input — deduplicate before calling")
+
     # Compute EV for all candidates up-front so we only call ev() once each.
     ev_map: dict[int, float] = {id(c): ev(c) for c in candidates}
 
@@ -180,6 +183,7 @@ def select_best_city_candidates(
     for group_candidates in groups.values():
         best_ev = max(ev_map[id(c)] for c in group_candidates)
 
+        # Strictly positive edge required — zero EV does not justify entry operational overhead
         if best_ev <= 0.0:
             # All candidates are negative (or zero) EV — skip group entirely.
             continue
@@ -190,8 +194,9 @@ def select_best_city_candidates(
         if len(top) == 1:
             winners.add(id(top[0]))
         else:
-            # Tie-break: prefer lowest threshold_f (most conservative).
-            top_sorted = sorted(top, key=attrgetter("threshold_f"))
+            # Tie-break: prefer lowest threshold_f (most conservative);
+            # secondary: "yes" before "no" (deterministic — "no" sorts last).
+            top_sorted = sorted(top, key=lambda c: (c.threshold_f, c.token_side == "no"))
             winners.add(id(top_sorted[0]))
             for loser in top_sorted[1:]:
                 tie_break_losers.add(id(loser))

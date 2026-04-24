@@ -101,11 +101,16 @@ def _classify_row(row: dict[str, Any]) -> str:
 
     if exit_method is not None:
         # Manual / TP / SL exit: trust resolved_outcome field
-        return str(resolved_outcome) if resolved_outcome in ("win", "loss") else "loss"
+        return str(resolved_outcome) if resolved_outcome in ("win", "loss") else "unresolved"
 
-    if settlement_price is not None and 0.01 <= float(settlement_price) <= 0.99:
-        # Mid-market exit price — trust the pnl sign rather than oracle threshold
-        return "win" if pnl is not None and float(pnl) > 0 else "loss"
+    if settlement_price is not None:
+        try:
+            sp = float(settlement_price)
+        except (ValueError, TypeError):
+            sp = None
+        if sp is not None and 0.01 <= sp <= 0.99:
+            # Mid-market exit price — trust the pnl sign rather than oracle threshold
+            return "win" if pnl is not None and float(pnl) > 0 else "loss"
 
     # Oracle resolution: winning token settles at 1.0, losing at 0.0
     if settlement_price == 1.0 and pnl is not None and float(pnl) > 0:
@@ -192,9 +197,9 @@ def merge_entries_with_settlements(rows: list[dict]) -> list[dict]:
             # Settlement rows are consumed via the index; don't include them directly
             continue
         if event == "strategy_result":
+            row = dict(row)
             # Normalize strategy name for attribution
             if "strategy_name" not in row or not row["strategy_name"]:
-                row = dict(row)
                 row["strategy_name"] = normalize_strategy_name(row)
             key = make_entry_id(row)
             settlement = settlements.get(key)
