@@ -3,8 +3,7 @@ revision = 3
 requires-python = ">=3.12, <3.15"
 
 [options]
-exclude-newer = "2026-04-13T02:45:32.717519162Z"
-exclude-newer-span = "P3D"
+exclude-newer = "2026-04-24T00:00:00Z"
 
 [[package]]
 name = "accessible-pygments"

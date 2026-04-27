@@ -44,11 +44,13 @@ except ModuleNotFoundError:
 
 @dataclass(frozen=True, slots=True)
 class WeatherEnsembleSignalConfig:
-    min_edge: float = 0.05
+    min_edge: float = 0.10
+    min_convergence: float = 0.75  # ≥75% of members must agree on direction
     probability_floor: float = 0.05
     probability_ceiling: float = 0.95
-    max_entry_price: float = 0.95
-    signal_version: str = "weather_ensemble_v1"
+    max_entry_price: float = 0.90
+    same_day_only: bool = True  # only trade markets resolving today
+    signal_version: str = "weather_ensemble_v2"
 
 
 class WeatherEnsembleSignalEngine:
@@ -92,6 +94,19 @@ class WeatherEnsembleSignalEngine:
                 entry_price=None,
                 confidence=None,
                 reasons=(f"invalid_yes_price: {float(market.yes_price):.4f}",),
+            )
+
+        # Convergence gate: require strong member agreement
+        convergence = self._member_convergence(forecast=forecast, market=market)
+        if convergence is not None and convergence < self.config.min_convergence:
+            return self._filtered(
+                market=market,
+                forecast=forecast,
+                model_yes_probability=None,
+                edge=None,
+                entry_price=None,
+                confidence=None,
+                reasons=(f"low_convergence: {convergence:.2f} < {self.config.min_convergence:.2f}",),
             )
 
         model_yes_probability = self._model_yes_probability(forecast=forecast, market=market)
@@ -156,6 +171,31 @@ class WeatherEnsembleSignalEngine:
             forecast_source=forecast.source,
             forecast_model=forecast.model_name,
         )
+
+    def _member_convergence(
+        self,
+        *,
+        forecast: EnsembleForecastSnapshot,
+        market: WeatherMarketSnapshot,
+    ) -> float | None:
+        """Fraction of ensemble members that agree on the dominant outcome.
+
+        Returns the max(yes_fraction, no_fraction) for the relevant metric.
+        E.g., if 35/40 members say high >= threshold, convergence = 0.875.
+        """
+        members = forecast.member_highs if market.metric == "high" else forecast.member_lows
+        if not members:
+            return None
+
+        if market.band_type == "or_higher":
+            count_yes = sum(1 for v in members if v >= market.threshold)
+        elif market.band_type == "or_lower":
+            count_yes = sum(1 for v in members if v <= market.threshold)
+        else:
+            return None
+
+        yes_frac = count_yes / len(members)
+        return max(yes_frac, 1.0 - yes_frac)
 
     def _model_yes_probability(
         self,

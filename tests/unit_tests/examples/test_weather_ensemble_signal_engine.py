@@ -121,7 +121,7 @@ def test_signal_engine_filters_exact_band_market() -> None:
 
 def test_signal_engine_filters_when_edge_is_too_small() -> None:
     engine = WeatherEnsembleSignalEngine(
-        config=WeatherEnsembleSignalConfig(min_edge=0.08),
+        config=WeatherEnsembleSignalConfig(min_edge=0.08, min_convergence=0.0),
     )
 
     decision = engine.evaluate(
@@ -135,9 +135,24 @@ def test_signal_engine_filters_when_edge_is_too_small() -> None:
     assert decision.filter_reasons == ("edge_below_threshold: 0.0333 < 0.0800",)
 
 
+def test_signal_engine_filters_low_convergence() -> None:
+    engine = WeatherEnsembleSignalEngine(
+        config=WeatherEnsembleSignalConfig(min_edge=0.01, min_convergence=0.75),
+    )
+
+    # 2/3 members agree = 66.7% convergence, below 75% threshold
+    decision = engine.evaluate(
+        forecast=_forecast(highs=(20.0, 21.0, 19.0)),
+        market=_market(yes_price=0.50),
+    )
+
+    assert decision.filter_status == "filtered"
+    assert "low_convergence" in decision.filter_reasons[0]
+
+
 def test_signal_engine_uses_low_metric_distribution() -> None:
     engine = WeatherEnsembleSignalEngine(
-        config=WeatherEnsembleSignalConfig(min_edge=0.05),
+        config=WeatherEnsembleSignalConfig(min_edge=0.05, min_convergence=0.0),
     )
 
     decision = engine.evaluate(

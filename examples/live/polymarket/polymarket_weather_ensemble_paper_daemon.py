@@ -229,6 +229,19 @@ CITY_COORDINATES = {
     "Hong Kong": (22.3193, 114.1694),
 }
 
+# US cities use Fahrenheit on Polymarket; all others use Celsius.
+# The forecast must be fetched in the same unit as the market threshold.
+FAHRENHEIT_CITIES = frozenset({
+    "New York City", "Chicago", "Miami", "Los Angeles", "San Francisco",
+    "Seattle", "Denver", "Houston", "Dallas", "Austin", "Atlanta",
+    "Toronto",  # Polymarket uses °F for Toronto too
+})
+
+
+def _temperature_unit_for_city(city: str) -> str:
+    """Return 'fahrenheit' for US/Canadian cities, 'celsius' for the rest."""
+    return "fahrenheit" if city in FAHRENHEIT_CITIES else "celsius"
+
 
 class RecoverableDaemonError(RuntimeError):
     """Raised for recoverable session or round runtime failures."""
@@ -396,11 +409,21 @@ async def _fetch_forecasts(
     markets: list[DailyTemperatureMarket],
     forecast_client: OpenMeteoEnsembleForecastClient,
 ) -> dict[str, Any]:
-    """Fetch ensemble forecasts for all cities in markets using httpx."""
+    """Fetch ensemble forecasts for all cities in markets using httpx.
+
+    CRITICAL: fetches in Fahrenheit for US cities, Celsius for the rest,
+    matching the unit used in Polymarket market thresholds.
+    """
     import httpx
 
     forecasts = {}
     cities_seen = set()
+
+    # Build per-unit forecast clients (share cache but different unit param)
+    fahrenheit_client = OpenMeteoEnsembleForecastClient(
+        config=OpenMeteoEnsembleForecastConfig(temperature_unit="fahrenheit"),
+    )
+    celsius_client = forecast_client  # default is celsius
 
     async with httpx.AsyncClient() as http_client:
         for market in markets:
@@ -410,9 +433,12 @@ async def _fetch_forecasts(
                 continue
 
             cities_seen.add(market.city)
+            unit = _temperature_unit_for_city(market.city)
+            client = fahrenheit_client if unit == "fahrenheit" else celsius_client
+
             try:
                 lat, lon = CITY_COORDINATES[market.city]
-                snapshot = await forecast_client.fetch_snapshot(
+                snapshot = await client.fetch_snapshot(
                     http_client=http_client,
                     latitude=lat,
                     longitude=lon,
@@ -785,7 +811,14 @@ def main() -> int:
             config=OpenMeteoEnsembleForecastConfig(),
         )
         presets = _strategy_presets_for_set(args.preset_set)
-        signal_engine = WeatherEnsembleSignalEngine(config=WeatherEnsembleSignalConfig())
+        signal_config = WeatherEnsembleSignalConfig()
+        signal_engine = WeatherEnsembleSignalEngine(config=signal_config)
+
+        # Same-day filter: ensemble forecasts are most accurate for today
+        if signal_config.same_day_only:
+            today = date.today()
+            markets = [m for m in markets if m.observation_date == today]
+            print(f"[ensemble] Same-day filter: {len(markets)} markets for {today}")
 
         forecasts = await _fetch_forecasts(markets, forecast_client)
         candidates = []
