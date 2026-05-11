@@ -28,6 +28,43 @@ docker compose -f .docker/docker-compose.yml exec workspace make pytest
 docker compose -f .docker/docker-compose.yml exec workspace uv run python -c "import nautilus_trader"
 ```
 
+## Exchange data runners
+
+The compose stack also includes opt-in public market-data runners for centralized exchanges.
+These are intended for local adapter verification and feed inspection, not live trading.
+
+### Run Binance spot data
+
+```bash
+docker compose -f .docker/docker-compose.yml --profile exchanges run --rm binance-data
+```
+
+Override the default symbol or market type:
+
+```bash
+BINANCE_DATA_SYMBOL=ETHUSDT docker compose -f .docker/docker-compose.yml --profile exchanges run --rm binance-data
+BINANCE_DATA_ACCOUNT_TYPE=usdt_futures BINANCE_DATA_SYMBOL=BTCUSDT-PERP docker compose -f .docker/docker-compose.yml --profile exchanges run --rm binance-data
+```
+
+### Run Kraken spot data
+
+```bash
+docker compose -f .docker/docker-compose.yml --profile exchanges run --rm kraken-data
+```
+
+Override the default symbol or product type:
+
+```bash
+KRAKEN_DATA_SYMBOL=ETH/USD docker compose -f .docker/docker-compose.yml --profile exchanges run --rm kraken-data
+KRAKEN_DATA_PRODUCT_TYPE=futures KRAKEN_DATA_SYMBOL=PI_XBTUSD docker compose -f .docker/docker-compose.yml --profile exchanges run --rm kraken-data
+```
+
+### Coinbase status
+
+Coinbase is not wired into this local compose file yet. Upstream NautilusTrader has moved further on Coinbase,
+but this local fork still does not expose `nautilus_trader.adapters.coinbase` in Python, so a containerized
+Coinbase runner here would fail on import.
+
 ## Polymarket papertrade
 
 Use the `papertrade` service when you want live Polymarket market data with

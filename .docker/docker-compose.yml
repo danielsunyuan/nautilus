@@ -34,6 +34,80 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  binance-data:
+    container_name: nautilus-binance-data
+    profiles: ["exchanges"]
+    image: nautilus-trader:latest
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/binance/binance_data_tester.py
+      - --account-type
+      - ${BINANCE_DATA_ACCOUNT_TYPE:-spot}
+      - --symbol
+      - ${BINANCE_DATA_SYMBOL:-BTCUSDT}
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_CACHE_HOST:-redis}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+    volumes:
+      - ..:/workspace:ro
+    networks:
+      - nautilus-network
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  kraken-data:
+    container_name: nautilus-kraken-data
+    profiles: ["exchanges"]
+    image: nautilus-trader:latest
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/kraken/kraken_data_tester.py
+      - --product-type
+      - ${KRAKEN_DATA_PRODUCT_TYPE:-spot}
+      - --symbol
+      - ${KRAKEN_DATA_SYMBOL:-BTC/USD}
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_CACHE_HOST:-redis}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+    volumes:
+      - ..:/workspace:ro
+    networks:
+      - nautilus-network
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
   nordvpn:
     container_name: nautilus-nordvpn
     profiles: ["vpn"]
