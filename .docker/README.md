@@ -59,6 +59,28 @@ KRAKEN_DATA_SYMBOL=ETH/USD docker compose -f .docker/docker-compose.yml --profil
 KRAKEN_DATA_PRODUCT_TYPE=futures KRAKEN_DATA_SYMBOL=PI_XBTUSD docker compose -f .docker/docker-compose.yml --profile exchanges run --rm kraken-data
 ```
 
+## Interactive Brokers paper gateway
+
+The IBKR module is part of the Nautilus compose graph. Start the managed paper
+gateway with the `ibkr` profile, then run the Nautilus IB connectivity example
+against that service.
+
+### Start the paper gateway
+
+```bash
+docker compose -f .docker/docker-compose.yml --profile ibkr up -d ib-gateway-paper
+```
+
+The gateway API is published to `127.0.0.1:${IBKR_GATEWAY_HOST_PORT:-4002}` on
+the host, while Nautilus services inside Compose connect to
+`ib-gateway-paper:4004` over the Docker network.
+
+### Run the Nautilus IB paper example
+
+```bash
+docker compose -f .docker/docker-compose.yml --profile ibkr run --rm ibkr-paper
+```
+
 ### Coinbase status
 
 Coinbase is not wired into this local compose file yet. Upstream NautilusTrader has moved further on Coinbase,
@@ -78,7 +100,7 @@ These services use a prebuilt Nautilus runner image (built from
 ### Run the paper-trading example
 
 ```bash
-docker compose -f .docker/docker-compose.yml run --rm papertrade
+docker compose -f .docker/docker-compose.yml --profile polymarket run --rm papertrade
 ```
 
 ### Run through NordVPN
@@ -101,7 +123,7 @@ the container network path changes.
 stack against the **Up** or **Down** token:
 
 ```bash
-docker compose -f .docker/docker-compose.yml run --rm papertrade \
+docker compose -f .docker/docker-compose.yml --profile polymarket run --rm papertrade \
   python /workspace/examples/live/polymarket/polymarket_crypto_5m_paper_smoke.py --asset BTC
 ```
 
@@ -190,7 +212,7 @@ when this host needs NordVPN routing.
 ### Start the daemon
 
 ```bash
-docker compose -f .docker/docker-compose.yml up -d papertrade-daemon
+docker compose -f .docker/docker-compose.yml --profile polymarket up -d papertrade-daemon
 ```
 
 Start the daemon through NordVPN:
@@ -202,7 +224,7 @@ docker compose -f .docker/docker-compose.yml --profile vpn up -d papertrade-daem
 ### Follow daemon logs
 
 ```bash
-docker compose -f .docker/docker-compose.yml logs -f papertrade-daemon
+docker compose -f .docker/docker-compose.yml --profile polymarket logs -f papertrade-daemon
 ```
 
 For the VPN daemon, follow `papertrade-daemon-vpn`.
@@ -210,7 +232,7 @@ For the VPN daemon, follow `papertrade-daemon-vpn`.
 ### Stop the daemon
 
 ```bash
-docker compose -f .docker/docker-compose.yml stop papertrade-daemon
+docker compose -f .docker/docker-compose.yml --profile polymarket stop papertrade-daemon
 ```
 
 For the VPN daemon, stop `papertrade-daemon-vpn`.
@@ -224,7 +246,7 @@ The daemon defaults to:
 Override the command when you want bounded smoke runs or a different preset set:
 
 ```bash
-docker compose -f .docker/docker-compose.yml run --rm papertrade-daemon \
+docker compose -f .docker/docker-compose.yml --profile polymarket run --rm papertrade-daemon \
   python /workspace/examples/live/polymarket/polymarket_crypto_5m_paper_daemon.py \
   --asset BTC \
   --preset-set quant \
@@ -238,13 +260,13 @@ to it when you want `outputs/polymarket/reports/RESULTS.md` and
 `summary_latest.json` rebuilt automatically from those JSONL files:
 
 ```bash
-docker compose -f .docker/docker-compose.yml up -d crypto-results-reporter
+docker compose -f .docker/docker-compose.yml --profile polymarket up -d crypto-results-reporter
 ```
 
 The refresher defaults to every 60 seconds. Override it when starting Compose:
 
 ```bash
-REPORT_REFRESH_INTERVAL_SECONDS=30 docker compose -f .docker/docker-compose.yml up -d crypto-results-reporter
+REPORT_REFRESH_INTERVAL_SECONDS=30 docker compose -f .docker/docker-compose.yml --profile polymarket up -d crypto-results-reporter
 ```
 
 ## BTC Microstructure Paper Trading

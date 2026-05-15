@@ -108,6 +108,64 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  ibkr-paper:
+    container_name: nautilus-ibkr-paper
+    profiles: ["ibkr"]
+    image: nautilus-trader:latest
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/interactive_brokers/connect_with_dockerized_gateway.py
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_CACHE_HOST:-redis}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+      IBKR_GATEWAY_HOST: ${IBKR_GATEWAY_HOST:-ib-gateway-paper}
+      IBKR_GATEWAY_PORT: ${IBKR_GATEWAY_PORT:-4004}
+    volumes:
+      - ..:/workspace:ro
+    networks:
+      - nautilus-network
+    depends_on:
+      ib-gateway-paper:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  ib-gateway-paper:
+    container_name: nautilus-ib-gateway-paper
+    profiles: ["ibkr"]
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    env_file:
+      - ../.env
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        export TWS_USERID="$${PAPER_TWS_USERNAME:?PAPER_TWS_USERNAME is required}"
+        export TWS_PASSWORD="$${PAPER_TWS_PASSWORD:?PAPER_TWS_PASSWORD is required}"
+        exec /home/ibgateway/scripts/run.sh
+    environment:
+      TRADING_MODE: paper
+      READ_ONLY_API: "yes"
+    ports:
+      - "127.0.0.1:${IBKR_GATEWAY_HOST_PORT:-4002}:4004"
+    networks:
+      - nautilus-network
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
   nordvpn:
     container_name: nautilus-nordvpn
     profiles: ["vpn"]
@@ -143,6 +201,7 @@ services:
 
   papertrade:
     container_name: nautilus-trader
+    profiles: ["polymarket"]
     image: nautilus-trader:latest
     build:
       context: ..
@@ -181,6 +240,7 @@ services:
 
   papertrade-daemon:
     container_name: nautilus-crypto-5m-daemon
+    profiles: ["polymarket"]
     image: nautilus-trader:latest
     build:
       context: ..
@@ -367,6 +427,7 @@ services:
 
   crypto-results-reporter:
     container_name: nautilus-crypto-results-reporter
+    profiles: ["polymarket"]
     image: nautilus-trader:latest
     build:
       context: ..
@@ -397,6 +458,7 @@ services:
 
   sports-results-reporter:
     container_name: nautilus-sports-results-reporter
+    profiles: ["polymarket"]
     image: nautilus-trader:latest
     user: "${UID:-1000}:${GID:-1000}"
     working_dir: /opt/pysetup
@@ -1221,6 +1283,7 @@ services:
 
   weather-ensemble-results-reporter:
     container_name: nautilus-weather-ensemble-results-reporter
+    profiles: ["polymarket"]
     image: nautilus-trader:latest
     build:
       context: ..

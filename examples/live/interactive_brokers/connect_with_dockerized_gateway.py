@@ -18,8 +18,6 @@
 import os
 
 from nautilus_trader.adapters.interactive_brokers.common import IB
-from nautilus_trader.adapters.interactive_brokers.common import IBContract
-from nautilus_trader.adapters.interactive_brokers.config import DockerizedIBGatewayConfig
 from nautilus_trader.adapters.interactive_brokers.config import IBMarketDataTypeEnum
 from nautilus_trader.adapters.interactive_brokers.config import InteractiveBrokersDataClientConfig
 from nautilus_trader.adapters.interactive_brokers.config import InteractiveBrokersExecClientConfig
@@ -47,50 +45,11 @@ from nautilus_trader.model.identifiers import InstrumentId
 
 # *** THIS INTEGRATION IS STILL UNDER CONSTRUCTION. ***
 # *** CONSIDER IT TO BE IN AN UNSTABLE BETA PHASE AND EXERCISE CAUTION. ***
-
-ib_contracts = [
-    IBContract(
-        secType="STK",
-        symbol="SPY",
-        exchange="SMART",
-        primaryExchange="ARCA",
-        build_options_chain=True,
-        min_expiry_days=7,
-        max_expiry_days=14,
-    ),
-    IBContract(
-        secType="CONTFUT",
-        exchange="CME",
-        symbol="ES",
-        build_futures_chain=True,
-    ),
-    IBContract(secType="FUT", exchange="NYMEX", localSymbol="CLV7", build_futures_chain=False),
-]
-
-dockerized_gateway = DockerizedIBGatewayConfig(
-    username=os.environ["TWS_USERNAME"],
-    password=os.environ["TWS_PASSWORD"],
-    trading_mode="paper",
-    read_only_api=True,
-)
+IBKR_GATEWAY_HOST = os.environ.get("IBKR_GATEWAY_HOST", "127.0.0.1")
+IBKR_GATEWAY_PORT = int(os.environ.get("IBKR_GATEWAY_PORT", "4002"))
 
 instrument_provider = InteractiveBrokersInstrumentProviderConfig(
-    build_futures_chain=False,
-    build_options_chain=False,
-    min_expiry_days=10,
-    max_expiry_days=60,
-    load_ids=frozenset(
-        [
-            "EUR/USD.IDEALPRO",
-            "BTC/USD.PAXOS",
-            "SPY.ARCA",
-            "V.NYSE",
-            "YMH4.CBOT",
-            "CLZ7.NYMEX",
-            "ESZ7.CME",
-        ],
-    ),
-    load_contracts=frozenset(ib_contracts),
+    load_ids=frozenset(["SPY.ARCA"]),
 )
 
 # Configure the trading node
@@ -100,19 +59,21 @@ config_node = TradingNodeConfig(
     logging=LoggingConfig(log_level="INFO"),
     data_clients={
         IB: InteractiveBrokersDataClientConfig(
+            ibg_host=IBKR_GATEWAY_HOST,
+            ibg_port=IBKR_GATEWAY_PORT,
             ibg_client_id=1,
             handle_revised_bars=False,
             use_regular_trading_hours=True,
             market_data_type=IBMarketDataTypeEnum.DELAYED_FROZEN,  # If unset default is REALTIME
             instrument_provider=instrument_provider,
-            dockerized_gateway=dockerized_gateway,
         ),
     },
     exec_clients={
         IB: InteractiveBrokersExecClientConfig(
+            ibg_host=IBKR_GATEWAY_HOST,
+            ibg_port=IBKR_GATEWAY_PORT,
             ibg_client_id=1,
-            account_id="DU123456",  # This must match with the IB Gateway/TWS node is connecting to
-            dockerized_gateway=dockerized_gateway,
+            account_id=os.environ["PAPER_TWS_ACCOUNT"],
             instrument_provider=instrument_provider,
             routing=RoutingConfig(
                 default=True,
@@ -135,12 +96,9 @@ node = TradingNode(config=config_node)
 
 # Configure your strategy
 strategy_config = SubscribeStrategyConfig(
-    instrument_id=InstrumentId.from_str("EUR/USD.IDEALPRO"),
-    # book_type=None,
-    # snapshots=True,
+    instrument_id=InstrumentId.from_str("SPY.ARCA"),
     trade_ticks=False,
     quote_ticks=True,
-    # bars=True,
 )
 # Instantiate your strategy
 strategy = SubscribeStrategy(config=strategy_config)

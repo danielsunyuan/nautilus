@@ -16,7 +16,7 @@ This repository is worked from a Dockerized development environment.
 - Run Python tooling: `docker compose -f .docker/docker-compose.yml exec workspace uv run ...`
 - Run Make targets: `docker compose -f .docker/docker-compose.yml exec workspace make ...`
 - Run tests: `docker compose -f .docker/docker-compose.yml exec workspace make pytest`
-- Run the Polymarket paper trader: `docker compose -f .docker/docker-compose.yml run --rm papertrade`
+- Run the Polymarket paper trader: `docker compose -f .docker/docker-compose.yml --profile polymarket run --rm papertrade`
 
 ## Notes
 
