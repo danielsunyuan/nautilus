@@ -48,6 +48,7 @@ except ModuleNotFoundError:
 
 
 class WeatherEnsemblePaperStrategyConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId | None = None
     condition_id: str | None = None
     yes_token_id: str | None = None
     no_token_id: str | None = None
@@ -56,6 +57,13 @@ class WeatherEnsemblePaperStrategyConfig(StrategyConfig, frozen=True):
     edge: float | None = None
     selected_side: str | None = None
     confidence: float | None = None
+    preset: WeatherEnsembleStrategyPreset | None = None
+    family_instrument_ids: tuple[InstrumentId, ...] = ()
+    target_usd_per_market: Decimal = Decimal("1")
+    min_order_size_shares: Decimal = Decimal("1")
+    max_stake_per_market: Decimal | None = None
+    max_open_positions: int | None = None
+    max_total_open_stake: Decimal | None = None
     close_positions_on_stop: bool = True
 
 
