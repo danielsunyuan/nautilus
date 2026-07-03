@@ -238,6 +238,56 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  london-weather-paper:
+    container_name: nautilus-london-weather-paper
+    profiles: ["polymarket"]
+    image: nautilus-trader:latest
+    build:
+      context: ..
+      dockerfile: .docker/nautilus_trader.dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /opt/pysetup
+    command:
+      - python
+      - /workspace/examples/live/polymarket/polymarket_london_weather_model_paper_daemon.py
+      - --max-rounds
+      - ${POLYMARKET_LONDON_WEATHER_MAX_ROUNDS:-1}
+      - --min-edge
+      - ${POLYMARKET_LONDON_WEATHER_MIN_EDGE:-0.08}
+      - --target-usd-per-market
+      - ${POLYMARKET_LONDON_WEATHER_TARGET_USD:-1}
+      - --max-total-open-stake
+      - ${POLYMARKET_LONDON_WEATHER_MAX_TOTAL_STAKE:-5}
+    init: true
+    tty: true
+    stdin_open: true
+    env_file:
+      - ../.env
+    environment:
+      NAUTILUS_CACHE_HOST: ${NAUTILUS_CACHE_HOST:-redis}
+      NAUTILUS_CACHE_PORT: ${NAUTILUS_CACHE_PORT:-6379}
+      WEATHER_RESEARCH_PATH: ${WEATHER_RESEARCH_PATH:-/workspace_research/weather}
+      POLYMARKET_LIVE_DATA_READY: ${POLYMARKET_LIVE_DATA_READY:-}
+      POLYMARKET_FORCE_LIVE_EXECUTION: ""
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET:-unused}
+      POLYMARKET_PASSPHRASE: ${POLYMARKET_PASSPHRASE:-unused}
+      POLYMARKET_CLOB_API_SECRET: ${POLYMARKET_CLOB_API_SECRET:-unused}
+      POLYMARKET_CLOB_PASSPHRASE: ${POLYMARKET_CLOB_PASSPHRASE:-unused}
+    volumes:
+      - ..:/workspace:ro
+      - ../../research/weather:/workspace_research/weather:ro
+      - ../outputs:/workspace/outputs
+    networks:
+      - nautilus-network
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
   papertrade-daemon:
     container_name: nautilus-crypto-5m-daemon
     profiles: ["polymarket"]
