@@ -303,6 +303,59 @@ Check the JSONL rows for:
 
 If live data access is blocked or no London markets are active, leave the runner dormant and run bridge tests against fixtures only. Do not broaden to other cities or live execution to make the run appear successful.
 
+## Operator Note — Running Task 6 on Atlas via OGMA Egress (verified 2026-07-04)
+
+Polymarket is IP-blocked from Atlas at the DNS level (both hosts resolve to an
+Azure block IP). The working egress is a targeted sshuttle sidecar through
+`ssh ogma`, defined in `.docker/docker-compose.ogma-tunnel.yml` (see its header
+for full usage). OGMA is a fragile production t3.micro: it carries only this
+thin market-data stream; never install anything on it or widen the routed CIDRs.
+
+From `~/EL/nautilus` on Atlas:
+
+```bash
+# 0. One-time: the Family B replay artifact lives under the EL data root, so
+#    the override bind-mounts ~/EL/data/weather/replays into the research mount.
+#    The nested mountpoint must exist:
+mkdir -p ~/EL/research/weather/data/replays
+
+# 1. Pinned Cloudflare IPs: defaults are baked into the override file. If they
+#    rot, re-resolve FROM OGMA (local DNS is poisoned) and export the
+#    POLYMARKET_*_IP / POLYMARKET_TUNNEL_CIDRS overrides:
+ssh ogma "getent ahostsv4 gamma-api.polymarket.com | head -1"
+
+# 2. Tunnel up (healthcheck = HTTP 200 from Gamma through the tunnel):
+docker compose -f .docker/docker-compose.yml -f .docker/docker-compose.ogma-tunnel.yml \
+  --profile polymarket up -d ogma-tunnel
+
+# 3. Preflight (expect blocked without the flag; green with it):
+docker compose -f .docker/docker-compose.yml -f .docker/docker-compose.ogma-tunnel.yml \
+  --profile polymarket run --rm -e POLYMARKET_LIVE_DATA_READY=yes \
+  london-weather-paper python /workspace/examples/live/polymarket/polymarket_london_weather_preflight.py
+
+# 4. One paper round (compose defaults: --max-rounds 1, min-edge 0.08,
+#    $1/market, $5 total; sandbox execution only):
+docker compose -f .docker/docker-compose.yml -f .docker/docker-compose.ogma-tunnel.yml \
+  --profile polymarket run --rm -e POLYMARKET_LIVE_DATA_READY=yes london-weather-paper
+
+# 5. Teardown (tunnel iptables rules live only in the sidecar's netns):
+docker compose -f .docker/docker-compose.yml -f .docker/docker-compose.ogma-tunnel.yml \
+  --profile polymarket rm -sf ogma-tunnel
+```
+
+Notes:
+
+- `POLYMARKET_FORCE_LIVE_EXECUTION` must never be set; the compose service
+  pins it empty.
+- sshuttle runs with `--no-latency-control`; without it the tunnel throttles
+  to ~90 KB/s and Gamma event pages (~4 MB) exceed the discovery HTTP timeout,
+  which surfaces as an empty market-discovery result (the fetch helper retries
+  and then swallows `HttpTimeoutError`).
+- The Gamma/CLOB hostname pins live in the tunnel service's `extra_hosts`;
+  the daemon shares the tunnel's network namespace and inherits its
+  `/etc/hosts`, so do not add `extra_hosts` to `london-weather-paper` (docker
+  rejects it alongside `network_mode`).
+
 ## Open Decisions
 
 1. Whether to import `research/weather` directly from Nautilus Docker or vendor a narrow probability service boundary.

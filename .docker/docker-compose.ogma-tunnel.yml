@@ -1,0 +1,97 @@
+# Targeted OGMA SSH egress for the London weather paper flow (Node J).
+#
+# Polymarket (gamma-api / clob / ws-subscriptions-clob / data-api) is
+# IP-blocked from this host at the DNS level (hosts resolve to an Azure block
+# IP). This override runs sshuttle inside a sidecar container (`ogma-tunnel`)
+# whose iptables rules live only in that container's own network namespace —
+# the host firewall and all other containers are untouched. Only the pinned
+# Polymarket Cloudflare IPs are routed through `ssh ogma`; everything else
+# (Open-Meteo, Redis, Postgres) egresses normally.
+#
+# OGMA is a fragile production t3.micro: it carries the thin market-data
+# stream only. Never install anything on it and never widen the routed CIDRs.
+#
+# Usage (from the repo root, alongside the base compose file):
+#
+#   # 1. Refresh the pinned IPs (resolve from OGMA — local DNS is poisoned):
+#   ssh ogma "getent ahostsv4 gamma-api.polymarket.com | head -1"
+#   # export POLYMARKET_*_IP / POLYMARKET_TUNNEL_CIDRS if they changed.
+#
+#   # 2. Ensure the replay mountpoint exists (nested under the ro research mount):
+#   mkdir -p ../research/weather/data/replays   # relative to repo root's parent
+#
+#   # 3. Start the tunnel and wait for it to become healthy:
+#   docker compose -f .docker/docker-compose.yml -f .docker/docker-compose.ogma-tunnel.yml \
+#     --profile polymarket up -d ogma-tunnel
+#
+#   # 4. Preflight, then one paper round (see docs/README.md operator note).
+#
+#   # 5. Tear down (removes the tunnel and its iptables namespace entirely):
+#   docker compose -f .docker/docker-compose.yml -f .docker/docker-compose.ogma-tunnel.yml \
+#     --profile polymarket rm -sf ogma-tunnel
+
+services:
+  ogma-tunnel:
+    container_name: nautilus-ogma-tunnel
+    profiles: ["polymarket"]
+    image: python:3.12-slim
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - nautilus-network
+    volumes:
+      # Mounted read-only at a staging path: ssh (running as root in the
+      # container) rejects config/keys owned by the host uid, so the
+      # startup command copies the ogma essentials with root ownership.
+      - ${HOME}/.ssh:/atlas-ssh:ro
+    extra_hosts:
+      - "gamma-api.polymarket.com:${POLYMARKET_GAMMA_IP:-104.18.34.205}"
+      - "clob.polymarket.com:${POLYMARKET_CLOB_IP:-104.18.34.205}"
+      - "ws-subscriptions-clob.polymarket.com:${POLYMARKET_WSS_IP:-104.18.34.205}"
+      - "data-api.polymarket.com:${POLYMARKET_DATA_API_IP:-172.64.153.51}"
+    command:
+      - bash
+      - -c
+      - >-
+        set -e;
+        apt-get update -qq &&
+        apt-get install -y -qq --no-install-recommends openssh-client iptables ca-certificates &&
+        pip install -q sshuttle &&
+        mkdir -p /root/.ssh &&
+        cp /atlas-ssh/config /atlas-ssh/known_hosts /atlas-ssh/id_ed25519_ogma /root/.ssh/ &&
+        chmod 700 /root/.ssh && chmod 600 /root/.ssh/config /root/.ssh/known_hosts /root/.ssh/id_ed25519_ogma &&
+        exec sshuttle
+        --no-latency-control
+        -e "ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30"
+        -r ogma
+        ${POLYMARKET_TUNNEL_CIDRS:-104.18.34.205/32 172.64.153.51/32}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        # Cloudflare 403s the default python UA; send a browser UA like the preflight does.
+        - "import urllib.request; urllib.request.urlopen(urllib.request.Request('https://gamma-api.polymarket.com/markets?limit=1', headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'}), timeout=8)"
+      interval: 10s
+      timeout: 12s
+      retries: 30
+      start_period: 90s
+    restart: "no"
+
+  london-weather-paper:
+    # Share the tunnel's network namespace so daemon traffic to the pinned
+    # Polymarket IPs is captured by sshuttle's (namespace-local) iptables
+    # rules. Redis/Postgres stay reachable via the tunnel's nautilus-network
+    # attachment.
+    # extra_hosts is intentionally absent here: with a shared network
+    # namespace the daemon inherits the tunnel container's /etc/hosts
+    # (docker rejects extra_hosts combined with network_mode anyway).
+    network_mode: "service:ogma-tunnel"
+    networks: !reset null
+    volumes:
+      # Family B model artifact lives under the EL data root, not the research
+      # checkout; nest it read-only where the snapshot builder expects it.
+      - ${WEATHER_REPLAYS_PATH:-../../data/weather/replays}:/workspace_research/weather/data/replays:ro
+    depends_on:
+      ogma-tunnel:
+        condition: service_healthy
