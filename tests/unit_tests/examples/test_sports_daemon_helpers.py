@@ -171,3 +171,93 @@ def test_result_extraction_credits_only_the_actual_runtime_strategy():
     assert [(row["preset_name"], row["strategy_id"], row["position_id"]) for row in credited] == [
         ("preset_a", "SPORTS-PRESET-A-001", "P-1"),
     ]
+
+
+def test_result_extraction_carries_position_commission():
+    daemon = _load_daemon_module()
+    market = SimpleNamespace(
+        slug="tennis-a-b",
+        condition_id="0xAAA",
+        token_id="token-1",
+        sport="tennis",
+        match_title="A vs B",
+        market_type="moneyline",
+        outcome_name="A",
+        game_time="2026-07-30T10:00:00Z",
+    )
+    preset = SimpleNamespace(
+        name="preset_a",
+        arena="sports_70c",
+        mode="basic",
+        min_ask=0.70,
+        max_ask=0.80,
+        allowed_sports=frozenset({"tennis"}),
+        allowed_market_types=frozenset({"moneyline"}),
+    )
+    position = SimpleNamespace(
+        id="P-1",
+        instrument_id=daemon._build_instrument_id(market),
+        strategy_id="SPORTS-PRESET-A-001",
+        peak_qty=Decimal("5"),
+        avg_px_open=Decimal("0.72"),
+        ts_opened=0,
+        commissions=lambda: [
+            SimpleNamespace(currency="USDC", as_decimal=lambda: Decimal("0.0123")),
+        ],
+    )
+
+    rows = daemon.extract_sports_strategy_results(
+        cache=_CacheWithPositions([position]),
+        markets=[market],
+        presets=(preset,),
+        strategy_ids_by_key={"tennis-a-b:preset_a": "SPORTS-PRESET-A-001"},
+    )
+
+    assert rows[0]["entry_fee"] == 0.0123
+    assert rows[0]["fee_status"] == "known"
+
+
+def test_result_extraction_marks_unavailable_commission_missing():
+    daemon = _load_daemon_module()
+    market = SimpleNamespace(
+        slug="tennis-a-b",
+        condition_id="0xAAA",
+        token_id="token-1",
+        sport="tennis",
+        match_title="A vs B",
+        market_type="moneyline",
+        outcome_name="A",
+        game_time="2026-07-30T10:00:00Z",
+    )
+    preset = SimpleNamespace(
+        name="preset_a",
+        arena="sports_70c",
+        mode="basic",
+        min_ask=0.70,
+        max_ask=0.80,
+        allowed_sports=frozenset({"tennis"}),
+        allowed_market_types=frozenset({"moneyline"}),
+    )
+
+    def unavailable_commissions():
+        raise RuntimeError("commission cache unavailable")
+
+    position = SimpleNamespace(
+        id="P-1",
+        instrument_id=daemon._build_instrument_id(market),
+        strategy_id="SPORTS-PRESET-A-001",
+        peak_qty=Decimal("5"),
+        avg_px_open=Decimal("0.72"),
+        ts_opened=0,
+        commissions=unavailable_commissions,
+    )
+
+    rows = daemon.extract_sports_strategy_results(
+        cache=_CacheWithPositions([position]),
+        markets=[market],
+        presets=(preset,),
+        strategy_ids_by_key={"tennis-a-b:preset_a": "SPORTS-PRESET-A-001"},
+    )
+
+    assert rows[0]["entry_fee"] is None
+    assert rows[0]["fee_status"] == "missing"

@@ -603,6 +603,25 @@ def _as_decimal(value: Any) -> Decimal:
     return Decimal(str(value))
 
 
+def _position_entry_fee(position: Any) -> Decimal | None:
+    """Return the position's commission when it is available in one currency."""
+    try:
+        commissions = position.commissions()
+    except Exception:
+        return None
+    if commissions is None:
+        return None
+    if not commissions:
+        return Decimal("0")
+    currencies = {str(getattr(commission, "currency", "")) for commission in commissions}
+    if "" in currencies or len(currencies) != 1:
+        return None
+    try:
+        return sum((_as_decimal(commission) for commission in commissions), start=Decimal("0"))
+    except Exception:
+        return None
+
+
 def _iso8601_from_unix_nanos(timestamp_ns: int | None) -> str | None:
     if not timestamp_ns:
         return None
@@ -649,6 +668,7 @@ def extract_sports_strategy_results(
                 shares = float(_as_decimal(getattr(pos, "peak_qty", None) or pos.quantity))
                 entry_price = float(pos.avg_px_open)
                 stake = float(Decimal(str(entry_price)) * Decimal(str(shares)))
+                entry_fee = _position_entry_fee(pos)
                 rows.append(
                     {
                         "event": "strategy_result",
@@ -667,6 +687,8 @@ def extract_sports_strategy_results(
                         "strategy_id": runtime_strategy_id_str,
                         "position_id": str(getattr(pos, "id", "")),
                         "entry_price": entry_price,
+                        "entry_fee": float(entry_fee) if entry_fee is not None else None,
+                        "fee_status": "known" if entry_fee is not None else "missing",
                         "shares": shares,
                         "stake": stake,
                         "accounting_status": "open",
@@ -696,6 +718,8 @@ def extract_sports_strategy_results(
                         "strategy_id": runtime_strategy_id_str,
                         "position_id": None,
                         "entry_price": None,
+                        "entry_fee": None,
+                        "fee_status": "not_applicable",
                         "shares": None,
                         "stake": None,
                         "accounting_status": "no_position",
