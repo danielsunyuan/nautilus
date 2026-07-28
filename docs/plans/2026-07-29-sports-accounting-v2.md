@@ -117,4 +117,3 @@
 2. Run `git diff --check`.
 3. Review every changed line against the design scope.
 4. Record commands and actual results in the final handoff.
-

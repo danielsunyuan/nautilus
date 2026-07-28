@@ -1,7 +1,7 @@
 # Sports Accounting V2 Design
 
-**Date:** 2026-07-29  
-**Status:** Approved for implementation  
+**Date:** 2026-07-29
+**Status:** Approved for implementation
 **Scope:** Historical simulation and sandbox paper infrastructure only
 
 ## Objective
@@ -73,4 +73,3 @@ Focused unit tests must prove:
 4. missing fees are visible in reports;
 5. CLV gating fails closed;
 6. all existing sports tests remain green in the compiled Nautilus image.
-
