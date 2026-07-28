@@ -45,7 +45,10 @@ def _classify_row(row: dict[str, Any]) -> str:
         return "no_trade"
     if not row.get("resolved"):
         return "unresolved"
-    pnl = row.get("pnl")
+    if row.get("fee_status") == "known":
+        pnl = row.get("net_pnl")
+    else:
+        pnl = row.get("gross_pnl", row.get("pnl"))
     if pnl is not None and pnl > 0:
         return "win"
     return "loss"
@@ -57,6 +60,8 @@ def _empty_bucket() -> dict[str, Any]:
         "resolved_losses": 0,
         "unresolved": 0,
         "no_trade": 0,
+        "fee_known": 0,
+        "fee_missing": 0,
         "net_pnl": 0.0,
         "entry_prices": [],
     }
@@ -68,7 +73,11 @@ def _accumulate(bucket: dict[str, Any], row: dict[str, Any], cls: str) -> None:
             bucket["resolved_wins"] += 1
         else:
             bucket["resolved_losses"] += 1
-        bucket["net_pnl"] += float(row.get("pnl") or 0.0)
+        if row.get("fee_status") == "known" and row.get("net_pnl") is not None:
+            bucket["fee_known"] += 1
+            bucket["net_pnl"] += float(row["net_pnl"])
+        else:
+            bucket["fee_missing"] += 1
         if row.get("entry_price") is not None:
             bucket["entry_prices"].append(float(row["entry_price"]))
     elif cls == "unresolved":
@@ -83,6 +92,7 @@ def _finalize_bucket(bucket: dict[str, Any]) -> None:
     resolved = wins + losses
     bucket["resolved_trades"] = resolved
     bucket["resolved_win_rate"] = wins / resolved if resolved > 0 else None
+    bucket["fee_complete"] = resolved > 0 and bucket["fee_known"] == resolved
 
     entry_prices = bucket.pop("entry_prices")
     avg_entry = sum(entry_prices) / len(entry_prices) if entry_prices else None
@@ -163,7 +173,15 @@ def merge_entries_with_settlements(rows: list[dict]) -> list[dict]:
             merged["resolved"] = True
             merged["resolved_outcome"] = settlement.get("resolved_outcome")
             merged["settlement_price"] = settlement.get("settlement_price")
-            merged["pnl"] = settlement.get("pnl")
+            for field in (
+                "gross_pnl",
+                "entry_fee",
+                "net_pnl",
+                "fee_status",
+                "pnl",
+            ):
+                if field in settlement:
+                    merged[field] = settlement[field]
             result.append(merged)
         else:
             result.append(row)
@@ -251,6 +269,8 @@ def build_sports_summary(rows: list[dict]) -> dict[str, Any]:
     total_resolved = total_wins + total_losses
     total_unresolved = sum(b["unresolved"] for b in arena_leaderboard)
     total_no_trade = sum(b["no_trade"] for b in arena_leaderboard)
+    total_fee_known = sum(b["fee_known"] for b in arena_leaderboard)
+    total_fee_missing = sum(b["fee_missing"] for b in arena_leaderboard)
     total_pnl = round(sum(b["net_pnl"] for b in arena_leaderboard), 6)
 
     totals: dict[str, Any] = {
@@ -260,6 +280,9 @@ def build_sports_summary(rows: list[dict]) -> dict[str, Any]:
         "unresolved": total_unresolved,
         "no_trade": total_no_trade,
         "resolved_win_rate": total_wins / total_resolved if total_resolved > 0 else None,
+        "fee_known": total_fee_known,
+        "fee_missing": total_fee_missing,
+        "fee_complete": total_resolved > 0 and total_fee_known == total_resolved,
         "net_pnl": total_pnl,
     }
 
@@ -343,7 +366,17 @@ def render_sports_markdown(summary: dict[str, Any]) -> str:
     md.append(f"**Unresolved:** {t['unresolved']}  ")
     md.append(f"**No Trade:** {t['no_trade']}  ")
     md.append(f"**Overall Win Rate:** {_pct(t['resolved_win_rate'])}  ")
-    md.append(f"**Net P/L:** {_money(t['net_pnl'])}  ")
+    fee_completeness = (
+        t["fee_known"] / t["resolved_trades"]
+        if t["resolved_trades"] > 0
+        else None
+    )
+    md.append(
+        f"**Fee completeness:** {t['fee_known']} / {t['resolved_trades']} "
+        f"resolved trades ({_pct(fee_completeness)})  "
+    )
+    pnl_label = "Net P/L" if t["fee_complete"] else "Known-fee Net P/L"
+    md.append(f"**{pnl_label}:** {_money(t['net_pnl'])}  ")
     md.append("")
 
     # Arena leaderboard
@@ -351,7 +384,7 @@ def render_sports_markdown(summary: dict[str, Any]) -> str:
     md.append("")
     md.append(
         "| Arena | Resolved | W | L | Unresolved | No Trade "
-        "| Win Rate | Breakeven | Edge | Net P/L |"
+        f"| Win Rate | Breakeven | Edge | {pnl_label} |"
     )
     md.append(
         "|-------|----------:|--:|--:|-----------:|---------:"
@@ -381,7 +414,7 @@ def render_sports_markdown(summary: dict[str, Any]) -> str:
     md.append("")
     md.append(
         "| Preset | Resolved | W | L | Unresolved | No Trade "
-        "| Win Rate | Breakeven | Edge | Net P/L |"
+        f"| Win Rate | Breakeven | Edge | {pnl_label} |"
     )
     md.append(
         "|--------|----------:|--:|--:|-----------:|---------:"
@@ -400,7 +433,7 @@ def render_sports_markdown(summary: dict[str, Any]) -> str:
     md.append("## Market Type Breakdown")
     md.append("")
     md.append(
-        "| Type | Resolved | W | L | Unresolved | Win Rate | Breakeven | Edge | Net P/L |"
+        f"| Type | Resolved | W | L | Unresolved | Win Rate | Breakeven | Edge | {pnl_label} |"
     )
     md.append(
         "|------|----------:|--:|--:|-----------:|---------:|----------:|-----:|--------:|"
@@ -423,7 +456,7 @@ def render_sports_markdown(summary: dict[str, Any]) -> str:
     md.append("## Sport Breakdown")
     md.append("")
     md.append(
-        "| Sport | Resolved | W | L | Unresolved | Win Rate | Breakeven | Edge | Net P/L |"
+        f"| Sport | Resolved | W | L | Unresolved | Win Rate | Breakeven | Edge | {pnl_label} |"
     )
     md.append(
         "|-------|----------:|--:|--:|-----------:|---------:|----------:|-----:|--------:|"
