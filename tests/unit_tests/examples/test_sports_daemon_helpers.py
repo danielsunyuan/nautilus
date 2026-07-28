@@ -6,6 +6,11 @@ daemon (which requires compiled Nautilus extensions).
 """
 from __future__ import annotations
 
+from decimal import Decimal
+import importlib.util
+from pathlib import Path
+from types import SimpleNamespace
+
 
 # --- Minimal stubs so we can test the pure helpers without Nautilus imports ---
 
@@ -90,3 +95,79 @@ def test_condition_grouping_keeps_distinct_ufc_markets_separate():
 
     assert groups["0xAAA"] == [_build_instrument_id(moneyline)]
     assert groups["0xBBB"] == [_build_instrument_id(prop)]
+
+
+def _load_daemon_module():
+    path = Path("examples/live/polymarket/polymarket_sports_paper_daemon.py")
+    spec = importlib.util.spec_from_file_location("sports_daemon_for_tests", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _CacheWithPositions:
+    def __init__(self, positions):
+        self._positions = positions
+
+    def positions_open(self):
+        return list(self._positions)
+
+
+def test_result_extraction_credits_only_the_actual_runtime_strategy():
+    daemon = _load_daemon_module()
+    market = SimpleNamespace(
+        slug="tennis-a-b",
+        condition_id="0xAAA",
+        token_id="token-1",
+        sport="tennis",
+        match_title="A vs B",
+        market_type="moneyline",
+        outcome_name="A",
+        game_time="2026-07-30T10:00:00Z",
+    )
+    presets = (
+        SimpleNamespace(
+            name="preset_a",
+            arena="sports_70c",
+            mode="basic",
+            min_ask=0.70,
+            max_ask=0.80,
+            allowed_sports=frozenset({"tennis"}),
+            allowed_market_types=frozenset({"moneyline"}),
+        ),
+        SimpleNamespace(
+            name="preset_b",
+            arena="sports_70c",
+            mode="basic",
+            min_ask=0.70,
+            max_ask=0.80,
+            allowed_sports=frozenset({"tennis"}),
+            allowed_market_types=frozenset({"moneyline"}),
+        ),
+    )
+    instrument_id = daemon._build_instrument_id(market)
+    position = SimpleNamespace(
+        id="P-1",
+        instrument_id=instrument_id,
+        strategy_id="SPORTS-PRESET-A-001",
+        peak_qty=Decimal("5"),
+        avg_px_open=Decimal("0.72"),
+        ts_opened=0,
+    )
+
+    rows = daemon.extract_sports_strategy_results(
+        cache=_CacheWithPositions([position]),
+        markets=[market],
+        presets=presets,
+        strategy_ids_by_key={
+            "tennis-a-b:preset_a": "SPORTS-PRESET-A-001",
+            "tennis-a-b:preset_b": "SPORTS-PRESET-B-001",
+        },
+    )
+
+    credited = [row for row in rows if row["accounting_status"] == "open"]
+    assert [(row["preset_name"], row["strategy_id"], row["position_id"]) for row in credited] == [
+        ("preset_a", "SPORTS-PRESET-A-001", "P-1"),
+    ]

@@ -618,47 +618,34 @@ def extract_sports_strategy_results(
 ) -> list[dict[str, Any]]:
     """Extract open positions from the cache for each (market, preset) pair.
 
-    NOTE: Nautilus auto-assigns numeric order_id_tags (e.g. SPORTS-760) to strategies
-    at registration time. These don't match the config strategy_id string, so filtering
-    by strategy_id is unreliable. Instead we query by instrument_id only (one open
-    position per instrument max, since price bands don't overlap) and infer which
-    preset entered by matching the entry price against the preset's band + sport filter.
+    ``strategy_ids_by_key`` contains the post-registration runtime IDs, including
+    any order-ID tag Nautilus assigned. Positions must match both instrument and
+    runtime strategy so one fill cannot be credited to multiple compatible
+    presets.
     """
-    # Build instrument_id → position map from all open positions in cache.
-    positions_by_instrument: dict[str, Any] = {}
+    positions_by_key: dict[tuple[str, str], Any] = {}
     try:
         for pos in cache.positions_open():
             iid = str(getattr(pos, "instrument_id", ""))
-            if iid:
-                positions_by_instrument[iid] = pos
+            strategy_id = str(getattr(pos, "strategy_id", ""))
+            if iid and strategy_id:
+                positions_by_key[(iid, strategy_id)] = pos
     except Exception:
         pass
 
     rows: list[dict[str, Any]] = []
     for market in markets:
         instrument_id_str = _build_instrument_id(market)
-        cache_instrument_id = InstrumentId.from_str(instrument_id_str)
-        pos = positions_by_instrument.get(instrument_id_str)
 
         for preset in presets:
             strategy_key = f"{market.slug}:{preset.name}"
-            if strategy_ids_by_key.get(strategy_key) is None:
+            runtime_strategy_id = strategy_ids_by_key.get(strategy_key)
+            if runtime_strategy_id is None:
                 continue
 
-            open_positions = [pos] if pos is not None else []
-
-            # Extra guard: verify the entry price falls within the preset's band.
-            # This avoids crediting a preset that didn't actually fire.
-            if open_positions:
-                entry_px = float(_as_decimal(getattr(pos, "avg_px_open", 0)))
-                if not (preset.min_ask <= entry_px < preset.max_ask):
-                    open_positions = []
-                elif preset.allowed_sports is not None and market.sport not in preset.allowed_sports:
-                    open_positions = []
-                elif preset.allowed_market_types is not None and market.market_type not in preset.allowed_market_types:
-                    open_positions = []
-            if open_positions:
-                pos = open_positions[-1]
+            runtime_strategy_id_str = str(runtime_strategy_id)
+            pos = positions_by_key.get((instrument_id_str, runtime_strategy_id_str))
+            if pos is not None:
                 shares = float(_as_decimal(getattr(pos, "peak_qty", None) or pos.quantity))
                 entry_price = float(pos.avg_px_open)
                 stake = float(Decimal(str(entry_price)) * Decimal(str(shares)))
@@ -677,6 +664,8 @@ def extract_sports_strategy_results(
                         "condition_id": market.condition_id,
                         "game_time": market.game_time,
                         "instrument_id": instrument_id_str,
+                        "strategy_id": runtime_strategy_id_str,
+                        "position_id": str(getattr(pos, "id", "")),
                         "entry_price": entry_price,
                         "shares": shares,
                         "stake": stake,
@@ -704,6 +693,8 @@ def extract_sports_strategy_results(
                         "condition_id": market.condition_id,
                         "game_time": market.game_time,
                         "instrument_id": instrument_id_str,
+                        "strategy_id": runtime_strategy_id_str,
+                        "position_id": None,
                         "entry_price": None,
                         "shares": None,
                         "stake": None,
