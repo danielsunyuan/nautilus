@@ -208,6 +208,36 @@ def test_eligibility_validates_quote_values_and_matching_freshness():
     )
 
 
+def test_eligibility_reconciles_clob_quote_and_consensus_evidence():
+    missing_clob = _observation()
+    missing_clob["source_freshness"] = missing_clob["source_freshness"][1:]
+    stale_venue = _observation()
+    stale_venue["venue_timestamp"] = "2026-07-20T11:00:00+00:00"
+    quote_time_mismatch = _observation()
+    quote_time_mismatch["bookmaker_quotes"][0]["observed_at"] = (
+        "2026-08-01T10:00:00+00:00"
+    )
+    implied_mismatch = _observation()
+    implied_mismatch["bookmaker_quotes"][0]["implied_probability"] = 0.10
+    consensus_mismatch = _observation(devig_consensus_probability=0.80)
+
+    assert "venue_freshness_mismatch" in mod.observation_exclusion_reasons(
+        missing_clob,
+    )
+    assert "venue_freshness_mismatch" in mod.observation_exclusion_reasons(
+        stale_venue,
+    )
+    assert "bookmaker_freshness_mismatch" in mod.observation_exclusion_reasons(
+        quote_time_mismatch,
+    )
+    assert "bookmaker_quote_invalid" in mod.observation_exclusion_reasons(
+        implied_mismatch,
+    )
+    assert "bookmaker_consensus_mismatch" in mod.observation_exclusion_reasons(
+        consensus_mismatch,
+    )
+
+
 def test_exact_winner_token_enrichment_ignores_outcome_label_drift():
     row = _observation(outcome_name="Persisted Label")
     enriched = mod.enrich_observation(
@@ -429,6 +459,10 @@ def test_checkpoint_gate_fails_when_one_checkpoint_loses_money():
             continue
         if row["token_id"].endswith("-a"):
             row["devig_consensus_probability"] = 0.60
+            for quote in row["bookmaker_quotes"]:
+                quote["devig_probability"] = (
+                    0.60 if quote["outcome_name"] == "Player A" else 0.40
+                )
         else:
             row.update(
                 {
@@ -438,6 +472,10 @@ def test_checkpoint_gate_fails_when_one_checkpoint_loses_money():
                     "devig_consensus_probability": 0.70,
                 },
             )
+            for quote in row["bookmaker_quotes"]:
+                quote["devig_probability"] = (
+                    0.70 if quote["outcome_name"] == "Player B" else 0.30
+                )
 
     report = mod.evaluate_forward_window(
         observations=observations,
@@ -496,6 +534,43 @@ def test_resolution_loader_ignores_truncated_tail_and_retries_incomplete_record(
     )
 
     assert mod.load_resolution_records(path) == {}
+
+
+def test_resolver_repairs_truncated_tail_before_append(tmp_path: Path):
+    resolution_path = tmp_path / "resolutions.jsonl"
+    resolution_path.write_text('{"schema_version":', encoding="utf-8")
+
+    async def fetch_resolution(condition_id: str):
+        return SimpleNamespace(
+            condition_id=condition_id,
+            resolved=True,
+            winning_token_id="token-a",
+            winning_outcome="Player A",
+            resolution_source=f"https://clob.test/markets/{condition_id}",
+            observed_at="2026-08-02T12:00:00+00:00",
+        )
+
+    first = asyncio.run(
+        mod.resolve_once(
+            observations=[_observation()],
+            resolution_path=resolution_path,
+            clob_host="https://clob.test",
+            fetch_resolution=fetch_resolution,
+        ),
+    )
+    second = asyncio.run(
+        mod.resolve_once(
+            observations=[_observation()],
+            resolution_path=resolution_path,
+            clob_host="https://clob.test",
+            fetch_resolution=fetch_resolution,
+        ),
+    )
+
+    assert first == 1
+    assert second == 0
+    assert list(mod.load_resolution_records(resolution_path)) == ["condition-1"]
+    assert len(resolution_path.read_text().splitlines()) == 1
 
 
 def test_resolve_once_appends_one_exact_record_and_is_restart_safe(tmp_path: Path):

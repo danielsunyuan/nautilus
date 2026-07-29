@@ -25,6 +25,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 
@@ -217,6 +218,8 @@ def observation_exclusion_reasons(row: dict[str, Any]) -> tuple[str, ...]:  # no
 
     quotes = row.get("bookmaker_quotes")
     bookmaker_outcomes: dict[str, set[str]] = defaultdict(set)
+    bookmaker_quote_times: dict[str, set[datetime]] = defaultdict(set)
+    bookmaker_devig: dict[str, dict[str, float]] = defaultdict(dict)
     quote_invalid = False
     if isinstance(quotes, list):
         for quote in quotes:
@@ -225,21 +228,40 @@ def observation_exclusion_reasons(row: dict[str, Any]) -> tuple[str, ...]:  # no
                 continue
             bookmaker = quote.get("bookmaker")
             outcome = quote.get("outcome_name")
-            if isinstance(bookmaker, str) and bookmaker and isinstance(outcome, str) and outcome:
+            quote_time = _parse_datetime(quote.get("observed_at"))
+            valid_identity = (
+                isinstance(bookmaker, str)
+                and bookmaker
+                and isinstance(outcome, str)
+                and outcome
+            )
+            if valid_identity:
                 bookmaker_outcomes[bookmaker].add(outcome)
+                if quote_time is not None:
+                    bookmaker_quote_times[bookmaker].add(quote_time)
             decimal_odds = _float_or_none(quote.get("decimal_odds"))
             implied = _float_or_none(quote.get("implied_probability"))
             devig = _float_or_none(quote.get("devig_probability"))
             if (
-                _parse_datetime(quote.get("observed_at")) is None
+                not valid_identity
+                or quote_time is None
                 or decimal_odds is None
                 or decimal_odds <= 1
                 or implied is None
                 or not 0 <= implied <= 1
+                or abs(implied - (1.0 / decimal_odds)) > 1e-6
                 or devig is None
                 or not 0 <= devig <= 1
+                or outcome in bookmaker_devig[bookmaker]
             ):
                 quote_invalid = True
+            else:
+                bookmaker_devig[bookmaker][outcome] = devig
+    if any(
+        abs(sum(probabilities.values()) - 1.0) > 1e-6
+        for probabilities in bookmaker_devig.values()
+    ):
+        quote_invalid = True
     if (
         len(bookmaker_outcomes) < MIN_BOOKMAKERS
         or any(len(outcomes) != 2 for outcomes in bookmaker_outcomes.values())
@@ -251,10 +273,24 @@ def observation_exclusion_reasons(row: dict[str, Any]) -> tuple[str, ...]:  # no
         reasons.append("bookmaker_count_below_3")
     if quote_invalid:
         reasons.append("bookmaker_quote_invalid")
+    consensus_values = [
+        probabilities[row.get("outcome_name")]
+        for probabilities in bookmaker_devig.values()
+        if row.get("outcome_name") in probabilities
+        and len(probabilities) == 2
+    ]
+    if (
+        consensus is not None
+        and len(consensus_values) >= MIN_BOOKMAKERS
+        and abs(consensus - median(consensus_values)) > 1e-6
+    ):
+        reasons.append("bookmaker_consensus_mismatch")
 
     freshness = row.get("source_freshness")
     source_stale = not isinstance(freshness, list) or not freshness
-    fresh_bookmakers: set[str] = set()
+    fresh_bookmaker_times: dict[str, datetime] = {}
+    clob_freshness_seen = False
+    venue_freshness_mismatch = False
     if isinstance(freshness, list):
         for source in freshness:
             if not isinstance(source, dict):
@@ -274,10 +310,30 @@ def observation_exclusion_reasons(row: dict[str, Any]) -> tuple[str, ...]:  # no
             ):
                 source_stale = True
             elif isinstance(source_name, str) and source_name.startswith("bookmaker:"):
-                fresh_bookmakers.add(source_name.removeprefix("bookmaker:"))
+                fresh_bookmaker_times[source_name.removeprefix("bookmaker:")] = source_time
+            elif source_name == "polymarket_clob":
+                clob_freshness_seen = True
+                if venue_time is None or abs((source_time - venue_time).total_seconds()) > 1.0:
+                    venue_freshness_mismatch = True
     if source_stale:
         reasons.append("source_stale")
-    if not set(bookmaker_outcomes).issubset(fresh_bookmakers):
+    if not clob_freshness_seen or venue_freshness_mismatch:
+        reasons.append("venue_freshness_mismatch")
+    if (
+        set(bookmaker_outcomes) != set(fresh_bookmaker_times)
+        or any(
+            len(bookmaker_quote_times.get(bookmaker, set())) != 1
+            or abs(
+                (
+                    next(iter(bookmaker_quote_times[bookmaker]))
+                    - fresh_bookmaker_times[bookmaker]
+                ).total_seconds(),
+            )
+            > 1.0
+            for bookmaker in bookmaker_outcomes
+            if bookmaker in fresh_bookmaker_times
+        )
+    ):
         reasons.append("bookmaker_freshness_mismatch")
 
     return _unique(reasons)
@@ -787,8 +843,29 @@ def evaluate_forward_window(
     }
 
 
+def _repair_resolution_tail(path: Path) -> None:
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    with path.open("r+b") as handle:
+        payload = handle.read()
+        if payload.endswith(b"\n"):
+            return
+        last_newline = payload.rfind(b"\n")
+        tail_start = last_newline + 1
+        try:
+            json.loads(payload[tail_start:].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            handle.truncate(tail_start)
+        else:
+            handle.seek(0, os.SEEK_END)
+            handle.write(b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def _append_resolution(path: Path, row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    _repair_resolution_tail(path)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
         handle.flush()
