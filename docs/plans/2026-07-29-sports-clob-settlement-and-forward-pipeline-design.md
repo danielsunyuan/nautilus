@@ -40,6 +40,11 @@ and observation timestamp. Network failures, malformed payloads, no winner,
 multiple winners, condition mismatches, and legacy entries without token IDs
 remain unresolved.
 
+Every accepted settlement row carries `winning_token_id`, `winning_outcome`,
+`resolution_source`, and `resolution_observed_at`. Missing entry fees preserve
+gross P/L but leave net P/L unknown; they cannot be counted as fee-complete
+performance.
+
 Three approaches were considered:
 
 - **Direct CLOB REST polling — selected.** Exact, public, restart-safe, and

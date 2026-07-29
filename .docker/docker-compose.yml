@@ -724,8 +724,8 @@ services:
       - /workspace/outputs
       - --poll-interval
       - "900"
-      - --gamma-host
-      - https://gamma-api.polymarket.com
+      - --clob-host
+      - https://clob.polymarket.com
     init: true
     tty: true
     stdin_open: true

@@ -45,8 +45,20 @@ missing-data reason.
 ## Resolution and research boundary
 
 Before resolution, both `clob_winner_evidence` and `named_source_outcome` are
-`null`. Once resolved, they must be populated together so CLOB settlement
-evidence can be checked against the named authoritative source.
+`null`. CLOB settlement is authoritative and comes from
+`GET /markets/{condition_id}`. A resolution is accepted only when the response
+has the requested condition ID, `closed=true`, and exactly one token with
+`winner=true`. The recorded winner is identified by its exact token ID; outcome
+labels are retained only as evidence and are never used to determine win or
+loss.
+
+Network errors, malformed payloads, condition mismatches, open markets, zero or
+multiple winners, and observations without the held token ID remain
+unresolved. No price or outcome-name fallback is permitted.
+
+`named_source_outcome` is independent reconciliation evidence. It is populated
+when the registered ATP or WTA source becomes available and is compared with
+the CLOB winner in derived research data; it does not override CLOB settlement.
 
 This schema adds no network collection, trading, deployment, or live-order
 behavior. Development and validation dates must be registered before analysis,
