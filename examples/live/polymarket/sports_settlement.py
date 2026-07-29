@@ -53,6 +53,8 @@ class UnresolvedEntry:
     outcome_name: str
     game_time: str
     source_file: str  # which JSONL file it came from
+    entry_fee: float | None = None
+    fee_status: str = "missing"
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +163,16 @@ def scan_unresolved_entries(jsonl_dir: Path) -> list[UnresolvedEntry]:
             outcome_name=outcome_name,
             game_time=row.get("game_time", ""),
             source_file=fname,
+            entry_fee=(
+                float(row["entry_fee"])
+                if row.get("fee_status") == "known" and row.get("entry_fee") is not None
+                else None
+            ),
+            fee_status=(
+                "known"
+                if row.get("fee_status") == "known" and row.get("entry_fee") is not None
+                else "missing"
+            ),
         )
 
     return list(seen.values())
@@ -207,9 +219,13 @@ def compute_settlement(
     else:
         settlement_price = 0.0
 
-    pnl = (settlement_price - entry.entry_price) * entry.shares
+    gross_pnl = (settlement_price - entry.entry_price) * entry.shares
+    fee_known = entry.fee_status == "known" and entry.entry_fee is not None
+    entry_fee = entry.entry_fee if fee_known else None
+    net_pnl = gross_pnl - entry_fee if entry_fee is not None else None
 
-    if pnl > 0:
+    outcome_pnl = net_pnl if net_pnl is not None else gross_pnl
+    if outcome_pnl > 0:
         resolved_outcome = "win"
     else:
         resolved_outcome = "loss"
@@ -230,7 +246,11 @@ def compute_settlement(
         "settlement_price": settlement_price,
         "shares": entry.shares,
         "stake": entry.stake,
-        "pnl": pnl,
+        "gross_pnl": gross_pnl,
+        "entry_fee": entry_fee,
+        "net_pnl": net_pnl,
+        "fee_status": "known" if fee_known else "missing",
+        "pnl": net_pnl,
         "resolved": True,
         "resolved_outcome": resolved_outcome,
     }

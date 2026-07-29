@@ -213,8 +213,8 @@ def clv_focused_presets() -> tuple[SportsStrategyPreset, ...]:
     Same sport+market-type whitelist as focused_presets(), plus min_clv_edge=0.05.
     Only enter when Polymarket ask is >= 5pp below Vegas implied probability.
 
-    Requires THE_ODDS_API_KEY env var. If Vegas data unavailable for a market,
-    has_clv_edge() returns True (don't block on missing data).
+    Requires THE_ODDS_API_KEY env var. If Vegas data is unavailable for a
+    market, the entry fails closed.
     """
     return tuple(
         replace(

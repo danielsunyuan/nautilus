@@ -603,6 +603,25 @@ def _as_decimal(value: Any) -> Decimal:
     return Decimal(str(value))
 
 
+def _position_entry_fee(position: Any) -> Decimal | None:
+    """Return the position's commission when it is available in one currency."""
+    try:
+        commissions = position.commissions()
+    except Exception:
+        return None
+    if commissions is None:
+        return None
+    if not commissions:
+        return Decimal("0")
+    currencies = {str(getattr(commission, "currency", "")) for commission in commissions}
+    if "" in currencies or len(currencies) != 1:
+        return None
+    try:
+        return sum((_as_decimal(commission) for commission in commissions), start=Decimal("0"))
+    except Exception:
+        return None
+
+
 def _iso8601_from_unix_nanos(timestamp_ns: int | None) -> str | None:
     if not timestamp_ns:
         return None
@@ -618,50 +637,38 @@ def extract_sports_strategy_results(
 ) -> list[dict[str, Any]]:
     """Extract open positions from the cache for each (market, preset) pair.
 
-    NOTE: Nautilus auto-assigns numeric order_id_tags (e.g. SPORTS-760) to strategies
-    at registration time. These don't match the config strategy_id string, so filtering
-    by strategy_id is unreliable. Instead we query by instrument_id only (one open
-    position per instrument max, since price bands don't overlap) and infer which
-    preset entered by matching the entry price against the preset's band + sport filter.
+    ``strategy_ids_by_key`` contains the post-registration runtime IDs, including
+    any order-ID tag Nautilus assigned. Positions must match both instrument and
+    runtime strategy so one fill cannot be credited to multiple compatible
+    presets.
     """
-    # Build instrument_id → position map from all open positions in cache.
-    positions_by_instrument: dict[str, Any] = {}
+    positions_by_key: dict[tuple[str, str], Any] = {}
     try:
         for pos in cache.positions_open():
             iid = str(getattr(pos, "instrument_id", ""))
-            if iid:
-                positions_by_instrument[iid] = pos
+            strategy_id = str(getattr(pos, "strategy_id", ""))
+            if iid and strategy_id:
+                positions_by_key[(iid, strategy_id)] = pos
     except Exception:
         pass
 
     rows: list[dict[str, Any]] = []
     for market in markets:
         instrument_id_str = _build_instrument_id(market)
-        cache_instrument_id = InstrumentId.from_str(instrument_id_str)
-        pos = positions_by_instrument.get(instrument_id_str)
 
         for preset in presets:
             strategy_key = f"{market.slug}:{preset.name}"
-            if strategy_ids_by_key.get(strategy_key) is None:
+            runtime_strategy_id = strategy_ids_by_key.get(strategy_key)
+            if runtime_strategy_id is None:
                 continue
 
-            open_positions = [pos] if pos is not None else []
-
-            # Extra guard: verify the entry price falls within the preset's band.
-            # This avoids crediting a preset that didn't actually fire.
-            if open_positions:
-                entry_px = float(_as_decimal(getattr(pos, "avg_px_open", 0)))
-                if not (preset.min_ask <= entry_px < preset.max_ask):
-                    open_positions = []
-                elif preset.allowed_sports is not None and market.sport not in preset.allowed_sports:
-                    open_positions = []
-                elif preset.allowed_market_types is not None and market.market_type not in preset.allowed_market_types:
-                    open_positions = []
-            if open_positions:
-                pos = open_positions[-1]
+            runtime_strategy_id_str = str(runtime_strategy_id)
+            pos = positions_by_key.get((instrument_id_str, runtime_strategy_id_str))
+            if pos is not None:
                 shares = float(_as_decimal(getattr(pos, "peak_qty", None) or pos.quantity))
                 entry_price = float(pos.avg_px_open)
                 stake = float(Decimal(str(entry_price)) * Decimal(str(shares)))
+                entry_fee = _position_entry_fee(pos)
                 rows.append(
                     {
                         "event": "strategy_result",
@@ -677,7 +684,11 @@ def extract_sports_strategy_results(
                         "condition_id": market.condition_id,
                         "game_time": market.game_time,
                         "instrument_id": instrument_id_str,
+                        "strategy_id": runtime_strategy_id_str,
+                        "position_id": str(getattr(pos, "id", "")),
                         "entry_price": entry_price,
+                        "entry_fee": float(entry_fee) if entry_fee is not None else None,
+                        "fee_status": "known" if entry_fee is not None else "missing",
                         "shares": shares,
                         "stake": stake,
                         "accounting_status": "open",
@@ -704,7 +715,11 @@ def extract_sports_strategy_results(
                         "condition_id": market.condition_id,
                         "game_time": market.game_time,
                         "instrument_id": instrument_id_str,
+                        "strategy_id": runtime_strategy_id_str,
+                        "position_id": None,
                         "entry_price": None,
+                        "entry_fee": None,
+                        "fee_status": "not_applicable",
                         "shares": None,
                         "stake": None,
                         "accounting_status": "no_position",

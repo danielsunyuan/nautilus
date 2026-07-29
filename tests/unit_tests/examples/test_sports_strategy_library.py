@@ -276,10 +276,9 @@ def test_clv_gate_allows_when_underpriced():
     )
 
 
-def test_clv_gate_passes_when_no_vegas_data():
+def test_clv_gate_blocks_when_no_vegas_data():
     preset = _make_preset(min_clv_edge=0.05)
-    # vegas_implied=None — don't block on missing data
-    assert should_enter_sports_market(
+    assert not should_enter_sports_market(
         preset=preset, bid=0.62, ask=0.63, bid_size=100, ask_size=100,
         sport="tennis", market_type="moneyline", vegas_implied=None,
     )

@@ -4,8 +4,8 @@ Vegas odds fetcher for CLV (Closing Line Value) comparison.
 Fetches h2h (moneyline) and totals odds from The Odds API and converts to
 implied probabilities for comparison against Polymarket ask prices.
 
-Requires env var THE_ODDS_API_KEY. Returns None gracefully if key is missing
-or API call fails — callers should treat None as "no data, don't block entry".
+Requires env var THE_ODDS_API_KEY. Returns None if the key is missing or an API
+call fails; CLV-confirmed callers must treat missing data as a blocked entry.
 """
 from __future__ import annotations
 
@@ -37,11 +37,13 @@ def has_clv_edge(
     min_edge: float = 0.05,
 ) -> bool:
     """
-    Return True if Polymarket is underpriced vs Vegas by at least min_edge,
-    OR if no Vegas data is available (don't block on missing data).
+    Return True if Polymarket is underpriced vs Vegas by at least min_edge.
+
+    Missing Vegas data fails closed because this predicate is used only by
+    presets that explicitly require external-price confirmation.
     """
     if vegas_implied is None:
-        return True
+        return False
     return (vegas_implied - polymarket_ask) >= min_edge
 
 
@@ -58,7 +60,6 @@ async def fetch_implied_prob(
     Fetch implied probability for a specific outcome from The Odds API.
 
     Returns None if API key missing, call fails, or team not found.
-    Callers should treat None as "no data, don't block entry".
     """
     api_key = os.getenv("THE_ODDS_API_KEY")
     if not api_key:

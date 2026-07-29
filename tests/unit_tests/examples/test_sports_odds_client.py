@@ -36,5 +36,5 @@ def test_has_clv_edge_overpriced():
 
 
 def test_has_clv_edge_no_vegas_data():
-    # No Vegas data available — should not block entry (return True)
-    assert client.has_clv_edge(polymarket_ask=0.65, vegas_implied=None, min_edge=0.05)
+    # A CLV-confirmed strategy must not degrade to a price-band entry.
+    assert not client.has_clv_edge(polymarket_ask=0.65, vegas_implied=None, min_edge=0.05)
