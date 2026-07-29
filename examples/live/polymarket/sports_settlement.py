@@ -10,7 +10,7 @@
 """
 Settlement polling resolver for Polymarket sports markets.
 
-Pure orchestration — reads JSONL files and queries Gamma API for market
+Pure orchestration — reads JSONL files and queries the CLOB API for market
 resolution status. No Nautilus TradingNode, no Strategy classes.
 """
 
@@ -55,16 +55,20 @@ class UnresolvedEntry:
     source_file: str  # which JSONL file it came from
     entry_fee: float | None = None
     fee_status: str = "missing"
+    token_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class MarketResolution:
-    """Resolution data for a market from Gamma API."""
+    """Resolution data for a market from the CLOB API."""
     condition_id: str
     slug: str
     resolved: bool
     winning_outcome: str | None  # outcome name or None if not resolved
     resolution_price: float | None  # 1.0 or 0.0
+    winning_token_id: str | None = None
+    resolution_source: str | None = None
+    observed_at: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +177,11 @@ def scan_unresolved_entries(jsonl_dir: Path) -> list[UnresolvedEntry]:
                 if row.get("fee_status") == "known" and row.get("entry_fee") is not None
                 else "missing"
             ),
+            token_id=(
+                row["token_id"]
+                if isinstance(row.get("token_id"), str)
+                else ""
+            ),
         )
 
     return list(seen.values())
@@ -206,15 +215,17 @@ def compute_settlement(
 
     Returns None if market not yet resolved.
     """
-    if not resolution.resolved:
+    if not resolution.resolved or resolution.condition_id != entry.condition_id:
         return None
-    if resolution.winning_outcome is None or resolution.resolution_price is None:
+    if (
+        not entry.token_id
+        or not resolution.winning_token_id
+        or resolution.winning_outcome is None
+        or resolution.resolution_price is None
+    ):
         return None
 
-    # Determine per-entry settlement price by comparing this entry's outcome
-    # against the market's winning outcome.  resolution_price=1.0 marks which
-    # outcome won at the market level; each entry must be matched individually.
-    if entry.outcome_name.strip().lower() == resolution.winning_outcome.strip().lower():
+    if entry.token_id == resolution.winning_token_id:
         settlement_price = 1.0
     else:
         settlement_price = 0.0
@@ -253,125 +264,98 @@ def compute_settlement(
         "pnl": net_pnl,
         "resolved": True,
         "resolved_outcome": resolved_outcome,
+        "winning_token_id": resolution.winning_token_id,
+        "winning_outcome": resolution.winning_outcome,
+        "resolution_source": resolution.resolution_source,
+        "resolution_observed_at": resolution.observed_at,
     }
 
 
 # ---------------------------------------------------------------------------
-# Gamma API fetch
+# CLOB API fetch
 # ---------------------------------------------------------------------------
 
 async def fetch_market_resolution(
     *,
     condition_id: str,
-    outcome_name: str,
-    market_slug: str = "",
     http_client: Any,
-    gamma_base_url: str,
+    clob_base_url: str,
     timeout: float = 15.0,
+    now_fn: Callable[[], datetime] | None = None,
 ) -> MarketResolution | None:
-    """Query Gamma API for a market's resolution status.
+    """Query the CLOB market endpoint and return exact winning-token evidence."""
+    endpoint = f"{clob_base_url.rstrip('/')}/markets/{condition_id}"
+    _now = now_fn or (lambda: datetime.now(tz=UTC))
 
-    Queries by slug (reliable) rather than condition_id (Gamma's condition_id
-    param is broken and returns wrong markets).  Falls back to condition_id
-    if no slug is available.
-    """
-    # Prefer slug — the condition_id query param is unreliable on Gamma.
-    # Must include closed=true: Gamma hides closed markets from default results,
-    # so without it a resolved market returns an empty list (appears unresolved).
-    query_param = ("slug", market_slug) if market_slug else ("condition_id", condition_id)
     try:
-        response = await http_client.get(
-            f"{gamma_base_url}/markets",
-            params={query_param[0]: query_param[1], "closed": "true"},
-            timeout=timeout,
-        )
+        response = await http_client.get(endpoint, timeout=timeout)
         response.raise_for_status()
         data = response.json()
     except Exception:
-        log.warning("Failed to fetch resolution for %s=%s", query_param[0], query_param[1])
+        log.warning("Failed to fetch CLOB resolution for condition_id=%s", condition_id)
         return None
 
-    # API returns a list; find our market
-    markets = data if isinstance(data, list) else [data]
-    if not markets:
-        # Nothing found even with closed=true — market genuinely not settled yet
-        return MarketResolution(
-            condition_id=condition_id,
-            slug=market_slug,
-            resolved=False,
-            winning_outcome=None,
-            resolution_price=None,
-        )
+    observed_at = _now().isoformat()
+    if not isinstance(data, dict) or data.get("condition_id") != condition_id:
+        log.warning("Rejected mismatched or malformed CLOB market for %s", condition_id)
+        return None
 
-    market = markets[0]
-
-    slug = market.get("slug", "")
-    closed = market.get("closed", False)
-    resolved = market.get("resolved", False)
-
-    # Treat as resolved if closed=True and prices are definitively 0/1.
-    # Polymarket closes markets before setting resolved=True (oracle delay),
-    # so checking only resolved=True would miss all newly-closed markets.
-    if not closed:
+    slug = str(data.get("market_slug") or data.get("slug") or "")
+    closed = data.get("closed")
+    if closed is False:
         return MarketResolution(
             condition_id=condition_id,
             slug=slug,
             resolved=False,
             winning_outcome=None,
             resolution_price=None,
+            resolution_source=endpoint,
+            observed_at=observed_at,
         )
+    if closed is not True:
+        log.warning("Rejected CLOB market with invalid closed state for %s", condition_id)
+        return None
 
-    # Determine winning outcome from outcomes + outcomePrices
-    outcomes = market.get("outcomes")
-    outcome_prices_raw = market.get("outcomePrices")
+    tokens = data.get("tokens")
+    if not isinstance(tokens, list):
+        log.warning("Rejected CLOB market without token data for %s", condition_id)
+        return None
 
-    # Parse outcomes
-    if isinstance(outcomes, str):
-        try:
-            outcomes = json.loads(outcomes)
-        except (ValueError, TypeError):
-            outcomes = None
-    if not isinstance(outcomes, list):
-        outcomes = None
-
-    # Parse outcome prices
-    if isinstance(outcome_prices_raw, str):
-        try:
-            outcome_prices_raw = json.loads(outcome_prices_raw)
-        except (ValueError, TypeError):
-            outcome_prices_raw = None
-    if not isinstance(outcome_prices_raw, list):
-        outcome_prices_raw = None
-
-    # Find the winning outcome (the one whose price settled at 1.0).
-    # Do NOT match against outcome_name here — the caller queries once per market
-    # and applies the result across multiple entries with different outcome_names.
-    # Per-entry win/loss is determined later in compute_settlement.
-    if outcomes and outcome_prices_raw and len(outcomes) == len(outcome_prices_raw):
-        for resolved_outcome, price in zip(outcomes, outcome_prices_raw):
-            price_float = float(price) if isinstance(price, (int, float, str)) else None
-            if price_float is None:
-                continue
-            if price_float == 1.0:
-                return MarketResolution(
-                    condition_id=condition_id,
-                    slug=slug,
-                    resolved=True,
-                    winning_outcome=resolved_outcome,
-                    resolution_price=1.0,
-                )
-
-        # No outcome found at price=1.0 — market closed but prices not yet final
-        return MarketResolution(
-            condition_id=condition_id,
-            slug=slug,
-            resolved=False,
-            winning_outcome=None,
-            resolution_price=None,  # not yet settled
+    winners = [
+        token
+        for token in tokens
+        if isinstance(token, dict) and token.get("winner") is True
+    ]
+    if len(winners) != 1:
+        log.warning(
+            "Rejected CLOB market with %d winning tokens for %s",
+            len(winners),
+            condition_id,
         )
+        return None
 
-    # Cannot determine resolution clearly — be conservative
-    return None
+    winner = winners[0]
+    winning_token_id = winner.get("token_id")
+    winning_outcome = winner.get("outcome")
+    if (
+        not isinstance(winning_token_id, str)
+        or not winning_token_id
+        or not isinstance(winning_outcome, str)
+        or not winning_outcome
+    ):
+        log.warning("Rejected malformed winning token for %s", condition_id)
+        return None
+
+    return MarketResolution(
+        condition_id=condition_id,
+        slug=slug,
+        resolved=True,
+        winning_outcome=winning_outcome,
+        resolution_price=1.0,
+        winning_token_id=winning_token_id,
+        resolution_source=endpoint,
+        observed_at=observed_at,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -428,11 +412,14 @@ async def run_settlement_loop(
                 event["timestamp"] = _now().isoformat()
                 writer.write(event)
                 settlements_written += 1
+                net_pnl = event["net_pnl"]
+                net_pnl_text = f"{net_pnl:.4f}" if net_pnl is not None else "unknown"
                 log.info(
-                    "Settled %s (%s): pnl=%.4f outcome=%s",
+                    "Settled %s (%s): gross_pnl=%.4f net_pnl=%s outcome=%s",
                     entry.market_slug,
                     entry.condition_id,
-                    event["pnl"],
+                    event["gross_pnl"],
+                    net_pnl_text,
                     event["resolved_outcome"],
                 )
 
@@ -453,7 +440,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="JSONL output directory")
     parser.add_argument("--poll-interval", type=float, default=900.0, help="seconds between polls (default 15 min)")
     parser.add_argument("--max-iterations", type=int, default=0, help="0 = poll forever")
-    parser.add_argument("--gamma-host", default="https://gamma-api.polymarket.com")
+    parser.add_argument("--clob-host", default="https://clob.polymarket.com")
     return parser
 
 
@@ -470,10 +457,8 @@ async def _async_main(args: argparse.Namespace) -> None:
         async def _fetch(*, condition_id: str, market_slug: str = "") -> MarketResolution | None:
             return await fetch_market_resolution(
                 condition_id=condition_id,
-                market_slug=market_slug,
-                outcome_name="",  # Not used in the resolution lookup; all outcomes handled per-group
                 http_client=client,
-                gamma_base_url=args.gamma_host,
+                clob_base_url=args.clob_host,
             )
 
         await run_settlement_loop(
