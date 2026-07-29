@@ -136,7 +136,33 @@ def observation_exclusion_reasons(row: dict[str, Any]) -> tuple[str, ...]:  # no
     checkpoint_lag = _float_or_none(row.get("checkpoint_lag_seconds"))
     if checkpoint_lag is None or checkpoint_lag < 0:
         reasons.append("checkpoint_lag_invalid")
-    elif checkpoint_lag > MAX_CHECKPOINT_LAG_SECONDS:
+    if (
+        collected_at is not None
+        and intended_at is not None
+        and start_time is not None
+        and venue_time is not None
+    ):
+        computed_lag = (collected_at - intended_at).total_seconds()
+        expected_offset = (
+            3600.0
+            if row.get("checkpoint") == "t_minus_60m"
+            else 900.0
+        )
+        if (
+            checkpoint_lag is None
+            or abs(checkpoint_lag - computed_lag) > 1.0
+        ):
+            reasons.append("checkpoint_lag_mismatch")
+        if (
+            computed_lag < 0
+            or collected_at >= start_time
+            or venue_time > collected_at
+            or abs((start_time - intended_at).total_seconds() - expected_offset) > 1.0
+        ):
+            reasons.append("checkpoint_time_invalid")
+        if computed_lag > MAX_CHECKPOINT_LAG_SECONDS:
+            reasons.append("checkpoint_late")
+    if checkpoint_lag is not None and checkpoint_lag > MAX_CHECKPOINT_LAG_SECONDS:
         reasons.append("checkpoint_late")
 
     bid = _float_or_none(row.get("best_bid"))
@@ -171,6 +197,12 @@ def observation_exclusion_reasons(row: dict[str, Any]) -> tuple[str, ...]:  # no
     ):
         reasons.append("market_parameters_invalid")
     if (
+        shares is not None
+        and minimum_order_size is not None
+        and minimum_order_size > shares
+    ):
+        reasons.append("minimum_order_size_exceeds_quantity")
+    if (
         fee_rate is None
         or fee_rate < 0
         or fee_exponent is None
@@ -185,38 +217,68 @@ def observation_exclusion_reasons(row: dict[str, Any]) -> tuple[str, ...]:  # no
 
     quotes = row.get("bookmaker_quotes")
     bookmaker_outcomes: dict[str, set[str]] = defaultdict(set)
-    quote_stale = False
+    quote_invalid = False
     if isinstance(quotes, list):
         for quote in quotes:
             if not isinstance(quote, dict):
+                quote_invalid = True
                 continue
             bookmaker = quote.get("bookmaker")
             outcome = quote.get("outcome_name")
             if isinstance(bookmaker, str) and bookmaker and isinstance(outcome, str) and outcome:
                 bookmaker_outcomes[bookmaker].add(outcome)
-            age = _float_or_none(quote.get("age_seconds"))
-            if age is None or age < 0 or age > MAX_SOURCE_AGE_SECONDS:
-                quote_stale = True
+            decimal_odds = _float_or_none(quote.get("decimal_odds"))
+            implied = _float_or_none(quote.get("implied_probability"))
+            devig = _float_or_none(quote.get("devig_probability"))
+            if (
+                _parse_datetime(quote.get("observed_at")) is None
+                or decimal_odds is None
+                or decimal_odds <= 1
+                or implied is None
+                or not 0 <= implied <= 1
+                or devig is None
+                or not 0 <= devig <= 1
+            ):
+                quote_invalid = True
     if (
         len(bookmaker_outcomes) < MIN_BOOKMAKERS
         or any(len(outcomes) != 2 for outcomes in bookmaker_outcomes.values())
+        or any(
+            row.get("outcome_name") not in outcomes
+            for outcomes in bookmaker_outcomes.values()
+        )
     ):
         reasons.append("bookmaker_count_below_3")
-    if quote_stale:
-        reasons.append("bookmaker_quote_stale")
+    if quote_invalid:
+        reasons.append("bookmaker_quote_invalid")
 
     freshness = row.get("source_freshness")
     source_stale = not isinstance(freshness, list) or not freshness
+    fresh_bookmakers: set[str] = set()
     if isinstance(freshness, list):
         for source in freshness:
             if not isinstance(source, dict):
                 source_stale = True
                 continue
+            source_name = source.get("source")
             age = _float_or_none(source.get("age_seconds"))
-            if age is None or age < 0 or age > MAX_SOURCE_AGE_SECONDS:
+            source_time = _parse_datetime(source.get("observed_at"))
+            if (
+                age is None
+                or age < 0
+                or age > MAX_SOURCE_AGE_SECONDS
+                or collected_at is None
+                or source_time is None
+                or source_time > collected_at
+                or abs((collected_at - source_time).total_seconds() - age) > 1.0
+            ):
                 source_stale = True
+            elif isinstance(source_name, str) and source_name.startswith("bookmaker:"):
+                fresh_bookmakers.add(source_name.removeprefix("bookmaker:"))
     if source_stale:
         reasons.append("source_stale")
+    if not set(bookmaker_outcomes).issubset(fresh_bookmakers):
+        reasons.append("bookmaker_freshness_mismatch")
 
     return _unique(reasons)
 
@@ -224,11 +286,18 @@ def observation_exclusion_reasons(row: dict[str, Any]) -> tuple[str, ...]:  # no
 def _files_for_paths(paths: Iterable[Path]) -> list[Path]:
     files: set[Path] = set()
     for path in paths:
+        if not path.exists():
+            raise FileNotFoundError(path)
         if path.is_dir():
-            files.update(path.rglob("sports_forward_*.jsonl"))
-            files.update(path.rglob("sports_forward_*.jsonl.gz"))
+            matched = set(path.rglob("sports_forward_*.jsonl"))
+            matched.update(path.rglob("sports_forward_*.jsonl.gz"))
+            if not matched:
+                raise ValueError(f"no sports forward files under {path}")
+            files.update(matched)
         elif path.is_file():
             files.add(path)
+    if not files:
+        raise ValueError("no sports forward files supplied")
     return sorted(files)
 
 
@@ -262,14 +331,21 @@ def load_resolution_records(path: str | Path) -> dict[str, dict[str, Any]]:
     if not resolution_path.exists():
         return result
     with resolution_path.open(encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
+        lines = handle.readlines()
+        final_nonempty = max(
+            (index for index, line in enumerate(lines) if line.strip()),
+            default=-1,
+        )
+        for line_index, line in enumerate(lines):
             if not line.strip():
                 continue
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
+                if line_index == final_nonempty:
+                    break
                 raise ValueError(
-                    f"invalid resolution JSON at {resolution_path}:{line_number}",
+                    f"invalid resolution JSON at {resolution_path}:{line_index + 1}",
                 ) from exc
             if not isinstance(row, dict):
                 continue
@@ -278,6 +354,15 @@ def load_resolution_records(path: str | Path) -> dict[str, dict[str, Any]]:
                 row.get("schema_version") == RESOLUTION_SCHEMA_VERSION
                 and isinstance(condition_id, str)
                 and condition_id
+                and isinstance(row.get("winning_token_id"), str)
+                and row["winning_token_id"]
+                and isinstance(row.get("winning_outcome"), str)
+                and row["winning_outcome"]
+                and isinstance(row.get("resolution_source"), str)
+                and row["resolution_source"]
+                and _parse_datetime(row.get("resolution_observed_at")) is not None
+                and row.get("reconciliation_status")
+                in {"matched", "mismatched", "unavailable"}
             ):
                 result[condition_id] = row
     return result
@@ -485,6 +570,98 @@ def _week_for_row(row: dict[str, Any]) -> str:
     return f"{year}-W{week:02d}"
 
 
+def _price_band_for_row(row: dict[str, Any]) -> str:
+    price = float(row["walked_ask"])
+    lower = int(price * 10) / 10
+    upper = lower + 0.1
+    return f"{lower:.2f}-{upper:.2f}"
+
+
+def _calibration_report(rows: list[dict[str, Any]]) -> dict[str, float | int | None]:
+    if not rows:
+        return {
+            "rows": 0,
+            "consensus_brier_score": None,
+            "clob_mid_brier_score": None,
+        }
+    consensus_squared_error = 0.0
+    midpoint_squared_error = 0.0
+    for row in rows:
+        actual = float(row["settlement_price"])
+        consensus = float(row["devig_consensus_probability"])
+        midpoint = (float(row["best_bid"]) + float(row["best_ask"])) / 2
+        consensus_squared_error += (consensus - actual) ** 2
+        midpoint_squared_error += (midpoint - actual) ** 2
+    return {
+        "rows": len(rows),
+        "consensus_brier_score": consensus_squared_error / len(rows),
+        "clob_mid_brier_score": midpoint_squared_error / len(rows),
+    }
+
+
+def _candidate_summary(rows: list[dict[str, Any]]) -> dict[str, float | int]:
+    candidates = select_registered_candidates(rows)
+    return {
+        "entries": len(candidates),
+        "net_pnl": sum(float(row["net_pnl"]) for row in candidates),
+    }
+
+
+def _bookmaker_count(row: dict[str, Any]) -> int:
+    quotes = row.get("bookmaker_quotes")
+    if not isinstance(quotes, list):
+        return 0
+    return len(
+        {
+            quote.get("bookmaker")
+            for quote in quotes
+            if isinstance(quote, dict)
+            and isinstance(quote.get("bookmaker"), str)
+            and quote["bookmaker"]
+        },
+    )
+
+
+def _maximum_bookmaker_age(row: dict[str, Any]) -> float:
+    freshness = row.get("source_freshness")
+    ages = [
+        float(source["age_seconds"])
+        for source in freshness
+        if isinstance(source, dict)
+        and isinstance(source.get("source"), str)
+        and source["source"].startswith("bookmaker:")
+        and _float_or_none(source.get("age_seconds")) is not None
+    ]
+    return max(ages, default=float("inf"))
+
+
+def _sensitivity_report(
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, dict[str, float | int]]]:
+    return {
+        "minimum_bookmakers": {
+            str(minimum): _candidate_summary(
+                [
+                    row
+                    for row in rows
+                    if _bookmaker_count(row) >= minimum
+                ],
+            )
+            for minimum in (3, 4, 5)
+        },
+        "maximum_quote_age_seconds": {
+            str(maximum): _candidate_summary(
+                [
+                    row
+                    for row in rows
+                    if _maximum_bookmaker_age(row) <= maximum
+                ],
+            )
+            for maximum in (60, 120, 180)
+        },
+    }
+
+
 def _concentration_gate(grouped_net: dict[str, float], total_net: float) -> bool:
     if total_net <= 0 or not grouped_net:
         return False
@@ -537,7 +714,12 @@ def evaluate_forward_window(
     )
 
     by_checkpoint = _sum_by(candidates, "checkpoint")
+    by_sport = _sum_by(candidates, "sport")
     by_tournament = _sum_by(candidates, "competition")
+    by_price_band: dict[str, float] = defaultdict(float)
+    for row in candidates:
+        by_price_band[_price_band_for_row(row)] += float(row["net_pnl"])
+    by_price_band = dict(sorted(by_price_band.items()))
     by_week: dict[str, float] = defaultdict(float)
     for row in candidates:
         by_week[_week_for_row(row)] += float(row["net_pnl"])
@@ -589,11 +771,15 @@ def evaluate_forward_window(
         },
         "exclusions": dict(sorted(exclusions.items())),
         "reconciliation": dict(sorted(reconciliation.items())),
+        "calibration": _calibration_report(resolved),
+        "sensitivity": _sensitivity_report(resolved),
         "performance": {
             "gross_pnl": gross_pnl,
             "entry_fees": entry_fees,
             "net_pnl": net_pnl,
             "by_checkpoint_net_pnl": by_checkpoint,
+            "by_sport_net_pnl": by_sport,
+            "by_price_band_net_pnl": by_price_band,
             "by_tournament_net_pnl": by_tournament,
             "by_week_net_pnl": by_week,
         },
@@ -621,6 +807,49 @@ def _load_sports_settlement_module() -> Any:
     return module
 
 
+def _append_named_reconciliations(
+    *,
+    existing: dict[str, dict[str, Any]],
+    named_results: dict[str, dict[str, Any]],
+    resolution_path: Path,
+) -> int:
+    written = 0
+    for condition_id, named_result in named_results.items():
+        current = existing.get(condition_id)
+        if current is None:
+            continue
+        named_source = named_result.get("source")
+        named_outcome = named_result.get("winning_outcome")
+        winning_outcome = current.get("winning_outcome")
+        if (
+            not isinstance(named_source, str)
+            or not named_source
+            or not isinstance(named_outcome, str)
+            or not named_outcome
+            or not isinstance(winning_outcome, str)
+            or not winning_outcome
+        ):
+            continue
+        reconciled = dict(current)
+        reconciled.update(
+            {
+                "named_source": named_source,
+                "named_source_outcome": named_outcome,
+                "reconciliation_status": (
+                    "matched"
+                    if _normalized_outcome(named_outcome)
+                    == _normalized_outcome(winning_outcome)
+                    else "mismatched"
+                ),
+            },
+        )
+        if reconciled != current:
+            _append_resolution(resolution_path, reconciled)
+            existing[condition_id] = reconciled
+            written += 1
+    return written
+
+
 async def resolve_once(
     *,
     observations: list[dict[str, Any]],
@@ -631,6 +860,12 @@ async def resolve_once(
 ) -> int:
     """Append newly resolved exact CLOB winner records once per condition."""
     existing = load_resolution_records(resolution_path)
+    written = _append_named_reconciliations(
+        existing=existing,
+        named_results=named_results or {},
+        resolution_path=resolution_path,
+    )
+
     condition_ids = sorted(
         {
             str(row["condition_id"])
@@ -640,7 +875,6 @@ async def resolve_once(
             and row["condition_id"] not in existing
         },
     )
-    written = 0
     if fetch_resolution is not None:
         for condition_id in condition_ids:
             resolution = await fetch_resolution(condition_id)
@@ -724,6 +958,19 @@ def main() -> None:
         observations=observations,
         resolutions=load_resolution_records(resolution_path),
     )
+    if args.command == "status":
+        report = {
+            key: report[key]
+            for key in (
+                "schema_version",
+                "evaluated_at",
+                "first_complete_at",
+                "counts",
+                "exclusions",
+                "reconciliation",
+                "gates",
+            )
+        }
     print(json.dumps(report, indent=2, sort_keys=True))
 
 
