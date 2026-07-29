@@ -17,6 +17,12 @@ The implementation lives in
 - the age of every data source and explicit missing-data reasons; and
 - eventual CLOB winner evidence paired with the named-source outcome.
 
+Atlas processing lives in
+`examples/live/polymarket/sports_forward_research.py`. It reads the raw OGMA
+files without rewriting them, appends exact winner-token records to a separate
+resolution JSONL, and emits a deterministic eligibility and performance
+report.
+
 ## Checkpoint semantics
 
 Checkpoint names such as `t_minus_60m` must be fixed before the forward window
@@ -63,3 +69,25 @@ the CLOB winner in derived research data; it does not override CLOB settlement.
 This schema adds no network collection, trading, deployment, or live-order
 behavior. Development and validation dates must be registered before analysis,
 with a separate untouched forward window reserved for evaluation.
+
+## Registered evaluation
+
+The primary rule was frozen on 2026-07-29, before any complete bookmaker row
+existed. It considers ATP/WTA singles moneylines at `t_minus_60m` and
+`t_minus_15m`, selects at most one outcome token per condition and checkpoint,
+and models exactly five shares at the stored walked ask. It requires:
+
+- no observation exclusion reason;
+- no more than a 0.02 bid/ask spread;
+- a walked ask from 0.50 through 0.980999...; and
+- at least 0.05 per-share expected edge after the captured entry fee.
+
+The fee calculation uses the row's market-specific rate and exponent:
+
+`round(shares * fee_rate * (price * (1 - price)) ** fee_exponent, 5)`
+
+CLOB winner-token identity determines the zero-or-one settlement price.
+Named ATP/WTA outcomes are reconciliation evidence only and never override the
+CLOB result. See
+`docs/plans/2026-07-29-sports-forward-evaluation.md` for the full registered
+gates and concentration tests.
